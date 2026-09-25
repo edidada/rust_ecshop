@@ -7,6 +7,7 @@ pub mod goods;
 pub mod health;
 pub mod marketing;
 pub mod order;
+pub mod payment;
 pub mod widgets;
 
 use axum::Router;
@@ -120,4 +121,6 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/me/orders/:id/address", patch(order::order_address_patch))
         .route("/api/v1/me/group-buys", get(order::me_group_buys))
         .route("/api/v1/me/group-buys/:id", get(order::me_group_buy_detail))
+        // payment callback
+        .route("/api/v1/payments/:provider/callback", post(payment::payment_callback))
 }
