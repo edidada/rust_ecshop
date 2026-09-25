@@ -1,3 +1,4 @@
+pub mod account;
 pub mod auth;
 pub mod community;
 pub mod content;
@@ -78,4 +79,24 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me).patch(auth::me_patch))
         .route("/api/v1/me/password", patch(auth::me_password_patch))
+        // account asset context
+        .route("/api/v1/me/addresses", get(account::address_list).post(account::address_create))
+        .route("/api/v1/me/addresses/:id", patch(account::address_update).delete(account::address_delete))
+        .route("/api/v1/me/favorites", get(account::favorite_list).post(account::favorite_create))
+        .route("/api/v1/me/favorites/:id", patch(account::favorite_update).delete(account::favorite_delete))
+        .route("/api/v1/me/bookings", get(account::booking_list).post(account::booking_create))
+        .route("/api/v1/me/bookings/:id", delete(account::booking_delete))
+        .route("/api/v1/me/bonuses", get(account::bonus_list))
+        .route("/api/v1/me/bonuses/claim", post(account::bonus_claim))
+        .route("/api/v1/me/email-verifications", post(account::email_verification_request))
+        .route("/api/v1/email-verifications/confirm", post(account::email_verification_confirm))
+        .route("/api/v1/password-resets", post(account::password_reset_request))
+        .route("/api/v1/password-resets/confirm", post(account::password_reset_confirm))
+        .route("/api/v1/newsletter-subscriptions", post(account::newsletter_subscribe).delete(account::newsletter_unsubscribe))
+        .route("/api/v1/newsletter-subscriptions/confirm", post(account::newsletter_confirm))
+        .route("/api/v1/newsletter-unsubscriptions/confirm", post(account::newsletter_confirm))
+        .route("/api/v1/me/account/requests", get(account::account_request_list).post(account::account_request_create))
+        .route("/api/v1/me/account/requests/:id", delete(account::account_request_cancel))
+        .route("/api/v1/me/account/requests/:id/payment", post(account::account_request_payment))
+        .route("/api/v1/me/account/transactions", get(account::account_transactions))
 }
