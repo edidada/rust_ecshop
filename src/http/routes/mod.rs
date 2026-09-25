@@ -1,3 +1,4 @@
+pub mod content;
 pub mod goods;
 pub mod health;
 
@@ -20,4 +21,13 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/brands/:id/goods", get(goods::brand_goods))
         .route("/api/v1/categories/:id/goods", get(goods::category_goods))
         .route("/api/v1/compare", get(goods::compare))
+        // content context
+        .route("/api/v1/regions", get(content::regions))
+        .route("/api/v1/articles/:id", get(content::article_detail))
+        .route(
+            "/api/v1/article-categories/:id/articles",
+            get(content::article_category_articles),
+        )
+        .route("/api/v1/shipping-options", get(content::shipping_options))
+        .route("/api/v1/quotation", get(content::quotation))
 }
