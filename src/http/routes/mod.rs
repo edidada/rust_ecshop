@@ -6,6 +6,7 @@ pub mod content;
 pub mod goods;
 pub mod health;
 pub mod marketing;
+pub mod order;
 pub mod widgets;
 
 use axum::Router;
@@ -105,4 +106,18 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/me/cart/:id", patch(cart::cart_update).delete(cart::cart_delete))
         .route("/api/v1/checkout/options", get(cart::checkout_options))
         .route("/api/v1/checkout/quote", post(cart::checkout_quote))
+        // order context
+        .route("/api/v1/orders", post(order::order_create))
+        .route("/api/v1/me/orders", get(order::order_list))
+        .route("/api/v1/me/orders/merge", post(order::order_merge))
+        .route("/api/v1/me/orders/by-number/:order_sn/status", get(order::order_status_by_sn))
+        .route("/api/v1/me/orders/:id", get(order::order_detail))
+        .route("/api/v1/me/orders/:id/cancel", post(order::order_cancel))
+        .route("/api/v1/me/orders/:id/received", post(order::order_received))
+        .route("/api/v1/me/orders/:id/cart", post(order::order_return_to_cart))
+        .route("/api/v1/me/orders/:id/surplus", patch(order::order_surplus))
+        .route("/api/v1/me/orders/:id/payment", patch(order::order_payment_patch))
+        .route("/api/v1/me/orders/:id/address", patch(order::order_address_patch))
+        .route("/api/v1/me/group-buys", get(order::me_group_buys))
+        .route("/api/v1/me/group-buys/:id", get(order::me_group_buy_detail))
 }
