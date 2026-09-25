@@ -1,0 +1,27 @@
+name: CI (main_dev)
+
+on:
+  push:
+    branches: [main_dev]
+  pull_request:
+    branches: [main_dev]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --all-targets
+      - name: Build
+        run: cargo build
+      - name: Test
+        run: cargo test --all-targets
