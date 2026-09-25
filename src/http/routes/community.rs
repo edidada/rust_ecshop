@@ -76,7 +76,7 @@ pub async fn messages_create(
     Json(body): Json<MessageCreateRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     let content_len = body.content.len();
-    if content_len < 1 || content_len > 2000 {
+    if !(1..=2000).contains(&content_len) {
         return Err(AppError::Validation("content must be 1-2000 bytes".to_string()));
     }
     if body.title.len() > 200 {
@@ -212,7 +212,7 @@ pub async fn goods_comment_create(
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     let goods_id = parse_id(&id)?;
     let content_len = body.content.len();
-    if content_len < 1 || content_len > 2000 {
+    if !(1..=2000).contains(&content_len) {
         return Err(AppError::Validation("content must be 1-2000 bytes".to_string()));
     }
     let db = state.db.clone();

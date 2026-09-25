@@ -53,22 +53,10 @@ pub fn hmac_sha256_hex(secret: &str, data: &[u8]) -> String {
 }
 
 fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
-    let mut salted = Vec::with_capacity(salt.len() + 4);
-    salted.extend_from_slice(salt);
-    salted.extend_from_slice(&1u32.to_be_bytes());
-    let mut mac = HmacSha256::new_from_slice(password).expect("hmac key");
-    mac.update(&salted);
-    let mut u = mac.finalize().into_bytes().to_vec();
-    let mut out = u.clone();
-    for _ in 1..iterations {
-        let mut mac = HmacSha256::new_from_slice(password).expect("hmac key");
-        mac.update(&u);
-        u = mac.finalize().into_bytes().to_vec();
-        for (o, x) in out.iter_mut().zip(u.iter()) {
-            *o ^= *x;
-        }
-    }
-    out
+    let mut out = [0u8; 32];
+    // pbkdf2_hmac returns () for HMAC-based derivation; it cannot fail for valid lengths.
+    pbkdf2::pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut out);
+    out.to_vec()
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -80,4 +68,51 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_hash_roundtrip() {
+        let hash = hash_password("correct-horse-battery-staple");
+        assert!(hash.starts_with("pbkdf2$60000$"));
+        assert!(verify_password("correct-horse-battery-staple", &hash));
+        assert!(!verify_password("wrong-password", &hash));
+        assert!(!verify_password("", &hash));
+    }
+
+    #[test]
+    fn password_hash_uses_random_salt() {
+        let a = hash_password("same-password");
+        let b = hash_password("same-password");
+        assert_ne!(a, b, "each hash must use a fresh random salt");
+        assert!(verify_password("same-password", &a));
+        assert!(verify_password("same-password", &b));
+    }
+
+    #[test]
+    fn verify_password_rejects_malformed_hash() {
+        assert!(!verify_password("pw", ""));
+        assert!(!verify_password("pw", "plaintext"));
+        assert!(!verify_password("pw", "md5$1$aa$bb"));
+        assert!(!verify_password("pw", "pbkdf2$notanumber$aa$bb"));
+    }
+
+    #[test]
+    fn sha256_hex_is_stable() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn hmac_sha256_hex_matches_known_vector() {
+        assert_eq!(
+            hmac_sha256_hex("key", b"The quick brown fox jumps over the lazy dog"),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+    }
 }

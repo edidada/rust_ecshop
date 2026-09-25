@@ -20,8 +20,7 @@ impl PageParams {
 
 pub fn parse_i64_param(value: Option<&str>, field: &str) -> Result<Option<i64>, AppError> {
     match value {
-        None => Ok(None),
-        Some(s) if s.is_empty() => Ok(None),
+        None | Some("") => Ok(None),
         Some(s) => s
             .parse::<i64>()
             .map(Some)
@@ -35,8 +34,11 @@ pub fn parse_i64_param_required(value: Option<&str>, field: &str) -> Result<i64,
 }
 
 /// Format integer cents as a two-decimal string. All money crosses the API as strings.
+/// Negative amounts format as "-1.50" (sign from the original value, magnitude from abs).
 pub fn cents_to_string(cents: i64) -> String {
-    format!("{}.{:02}", cents.div_euclid(100), cents.rem_euclid(100).abs())
+    let abs = cents.unsigned_abs();
+    let sign = if cents < 0 { "-" } else { "" };
+    format!("{}{}.{:02}", sign, abs / 100, abs % 100)
 }
 
 /// Parse a decimal money string into integer cents. Rejects floats' precision issues.
@@ -83,4 +85,47 @@ pub fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cents_to_string_formats_positive_amounts() {
+        assert_eq!(cents_to_string(0), "0.00");
+        assert_eq!(cents_to_string(5), "0.05");
+        assert_eq!(cents_to_string(50), "0.50");
+        assert_eq!(cents_to_string(4990), "49.90");
+        assert_eq!(cents_to_string(10780), "107.80");
+    }
+
+    #[test]
+    fn cents_to_string_formats_negative_amounts() {
+        assert_eq!(cents_to_string(-5), "-0.05");
+        assert_eq!(cents_to_string(-50), "-0.50");
+        assert_eq!(cents_to_string(-150), "-1.50");
+        assert_eq!(cents_to_string(-10780), "-107.80");
+    }
+
+    #[test]
+    fn cents_to_string_handles_i64_min_without_overflow() {
+        // unsigned_abs() is total, so i64::MIN does not panic or wrap.
+        // i64::MIN = -9223372036854775808 => magnitude ends in 8 cents => "-...08".
+        let s = cents_to_string(i64::MIN);
+        assert!(s.starts_with('-'));
+        assert!(s.ends_with(".08"));
+    }
+
+    #[test]
+    fn parse_money_cents_accepts_decimal_strings_only() {
+        assert_eq!(parse_money_cents("49.90", "a").unwrap(), 4990);
+        assert_eq!(parse_money_cents("5", "a").unwrap(), 500);
+        assert_eq!(parse_money_cents("0.05", "a").unwrap(), 5);
+        assert_eq!(parse_money_cents("12.3", "a").unwrap(), 1230);
+        assert!(parse_money_cents("1.234", "a").is_err());
+        assert!(parse_money_cents("-1.00", "a").is_err());
+        assert!(parse_money_cents("abc", "a").is_err());
+        assert!(parse_money_cents("", "a").is_err());
+    }
 }

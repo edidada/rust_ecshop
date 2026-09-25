@@ -18,10 +18,10 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".to_string(),
-            port: 8080,
+            port: 28080,
             database_url: "data/ecshop.sqlite3".to_string(),
             payment_callback_secret: "dev-payment-callback-secret".to_string(),
-            site_base_url: "http://127.0.0.1:8080".to_string(),
+            site_base_url: "http://127.0.0.1:28080".to_string(),
         }
     }
 }
@@ -47,6 +47,19 @@ impl AppConfig {
             site_base_url,
         }
     }
+
+    /// Fail fast when production boots with an unsafe fallback secret.
+    /// Development keeps the documented default so `cargo run` works out of the box.
+    pub fn validate(&self) -> Result<(), String> {
+        let unsafe_default = self.payment_callback_secret.is_empty()
+            || self.payment_callback_secret == "dev-payment-callback-secret";
+        if unsafe_default && std::env::var("ECSHOP_ENV").as_deref() == Ok("production") {
+            return Err(
+                "ECSHOP_PAYMENT_CALLBACK_SECRET must be set when ECSHOP_ENV=production".to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -56,6 +69,26 @@ struct RawConfig {
     host: String,
     #[serde(default)]
     port: u16,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_default_secret_in_production() {
+        std::env::remove_var("ECSHOP_ENV");
+        let config = AppConfig::default();
+        assert!(config.validate().is_ok(), "dev default is allowed outside production");
+        std::env::set_var("ECSHOP_ENV", "production");
+        assert!(AppConfig::default().validate().is_err());
+        let fixed = AppConfig {
+            payment_callback_secret: "real-secret-from-env".to_string(),
+            ..AppConfig::default()
+        };
+        assert!(fixed.validate().is_ok());
+        std::env::remove_var("ECSHOP_ENV");
+    }
 }
 
 /// Shared application state injected into handlers.

@@ -177,7 +177,7 @@ pub async fn goods_widget(
     let cat_id = parse_i64_param(q.cat_id.as_deref(), "cat_id")?;
     let brand_id = parse_i64_param(q.brand_id.as_deref(), "brand_id")?;
     let goods_num = parse_i64_param(q.goods_num.as_deref(), "goods_num")?.unwrap_or(10);
-    if goods_num < 1 || goods_num > 50 {
+    if !(1..=50).contains(&goods_num) {
         return Err(AppError::Validation("goods_num must be between 1 and 50".to_string()));
     }
     let intro_type = q.intro_type.clone().unwrap_or_else(|| "is_new".to_string());
@@ -206,11 +206,11 @@ pub async fn goods_widget(
             }
         }
         if let Some(cid) = cat_id {
-            where_clause = where_clause.replace("WHERE", &format!("WHERE cat_id = ? AND"));
+            where_clause = where_clause.replace("WHERE", "WHERE cat_id = ? AND");
             params.push(Box::new(cid));
         }
         if let Some(bid) = brand_id {
-            where_clause = where_clause.replace("WHERE", &format!("WHERE brand_id = ? AND"));
+            where_clause = where_clause.replace("WHERE", "WHERE brand_id = ? AND");
             params.push(Box::new(bid));
         }
         // Rebuild cleanly instead of string surgery above.

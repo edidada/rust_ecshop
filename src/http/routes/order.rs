@@ -7,6 +7,23 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// Row tuple loaded by order_merge for one pending order.
+type MergeOrderRow = (
+    String, // order_sn
+    i64,    // shipping_id
+    i64,    // pay_id
+    f64,    // goods_amount
+    f64,    // shipping_fee
+    f64,    // payment_fee
+    f64,    // order_amount
+    i64,    // idempotency_key not null flag
+    i64,    // placeholder 0
+    String, // remark
+    String, // consignee
+    String, // address
+    String, // mobile
+);
+
 use crate::http::auth::AuthUser;
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
@@ -521,7 +538,7 @@ pub async fn order_merge(
     let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
         let mut conn = db.blocking_lock();
         let tx = conn.transaction().map_err(db_err)?;
-        let load = |oid: i64| -> Result<(String, i64, i64, f64, f64, f64, f64, i64, i64, String, String, String, String), AppError> {
+        let load = |oid: i64| -> Result<MergeOrderRow, AppError> {
             tx.query_row(
                 "SELECT order_sn, shipping_id, pay_id, goods_amount, shipping_fee, payment_fee, order_amount, idempotency_key IS NOT NULL, 0, remark, consignee, address, mobile FROM ecs_order_info WHERE order_id = ?1 AND user_id = ?2 AND order_status = 'pending_payment'",
                 rusqlite::params![oid, user_id],

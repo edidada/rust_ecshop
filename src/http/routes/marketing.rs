@@ -91,8 +91,10 @@ pub async fn packages(State(state): State<AppState>) -> Result<Json<Value>, AppE
                 ))
             })
             .map_err(db_err)?;
-        let rows: Vec<(i64, String, String, i64, String, i64, i64, String)> =
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
+/// Row tuple for one active package activity.
+type PackageRow = (i64, String, String, i64, String, i64, i64, String);
+
+let rows: Vec<PackageRow> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
         let mut items = Vec::new();
         for (act_id, name, desc, _goods_id, _goods_name, start, end, ext_info) in rows {
             let package_price: f64 = serde_json::from_str::<Value>(&ext_info)

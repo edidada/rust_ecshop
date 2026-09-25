@@ -14,6 +14,9 @@ use crate::infrastructure::crypto;
 use crate::shared::error::AppError;
 use crate::shared::util::{cents_to_string, parse_money_cents, unix_now};
 
+/// Row tuple for one claimed bonus of the current user.
+type BonusRow = (i64, i64, String, i64, i64, i64, i64, i64);
+
 fn db_err(e: rusqlite::Error) -> AppError {
     AppError::Internal(e.into())
 }
@@ -610,8 +613,7 @@ pub async fn bonus_list(
                 ))
             })
             .map_err(db_err)?;
-        let rows: Vec<(i64, i64, String, i64, i64, i64, i64, i64)> =
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
+        let rows: Vec<BonusRow> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
         let items: Vec<Value> = rows
             .into_iter()
             .map(|(id, sn, name, money, use_start, use_end, order_id, used_time)| {
