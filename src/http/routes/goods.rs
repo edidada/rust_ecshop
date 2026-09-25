@@ -180,10 +180,10 @@ pub async fn goods_detail(
             )
             .optional()
             .map_err(db_err)?;
-        let Some(goods) = goods else {
-            return Err(AppError::NotFound("goods not found".to_string()));
+        let mut goods = match goods {
+            Some(Some(g)) => g,
+            _ => return Err(AppError::NotFound("goods not found".to_string())),
         };
-        let mut goods = goods.expect("matched optional row");
         let gallery: Vec<Value> = {
             let mut stmt = conn
                 .prepare("SELECT img_id, img_url, img_desc, thumb_url, img_original FROM ecs_goods_gallery WHERE goods_id = ?1 ORDER BY img_id")
