@@ -16,3 +16,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "1"
 anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+rand = "0.8"
+async-trait = "0.1"
+pbkdf2 = "0.12"

@@ -3,3 +3,6 @@ Cargo.lock.bak
 *.log
 logs/
 .env
+data/
+.idea
+*.iml

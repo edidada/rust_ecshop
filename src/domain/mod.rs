@@ -30,7 +30,7 @@ impl Money {
         self.cents
     }
 
-    pub fn to_decimal_string(&self) -> String {
+    pub fn to_decimal_string(self) -> String {
         format!("{:.2}", self.cents as f64 / 100.0)
     }
 }

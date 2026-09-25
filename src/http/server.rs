@@ -1,6 +1,7 @@
 use axum::Router;
 use tower_http::trace::TraceLayer;
 
+use crate::http::middleware::request_id;
 use crate::http::routes;
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
@@ -10,6 +11,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(routes::health_routes())
         .merge(routes::api_v1_routes())
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(request_id))
         .with_state(state)
 }
 

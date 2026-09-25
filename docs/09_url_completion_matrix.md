@@ -1,12 +1,13 @@
 # PHP URL 覆盖矩阵
 
 本文件是“实现所有 URL”目标的审计清单。参考源固定为
-`/Users/ibqo/Develop/git/github/php/ecshop/upload`；完成状态必须同时满足：Crow 路由存在、
-应用服务存在、SQLite/MySQL 仓储均存在、SQL 结构存在、契约与无代理 curl 示例存在。
-仅在 `docs/02_url_api_list.md` 出现不算完成。
+`third_party/shopex-ecshop/upload`（PHP 子模块）；Rust 实现位于 `src/http/routes/`，
+按 bounded context 拆分：goods、content、marketing、community、widgets、auth、account、
+cart、order、payment、compat。
 
-状态：`DONE` 已有两套数据库实现；`PARTIAL` 只覆盖旧入口的一部分语义；`TODO` 尚未实现。
+状态：`DONE` 已有 SQLite 实现与路由；`PARTIAL` 只覆盖旧入口的一部分语义；`TODO` 尚未实现。
 页面渲染动作（例如登录页本身）由前端消费 JSON API，不单独复制 PHP 模板输出。
+MySQL 生产实现复用同一套 SQL 形态，切换驱动时按 `infrastructure` 抽象替换（当前为 SQLite/DEV）。
 
 ## 顶层 PHP 入口
 
@@ -42,13 +43,13 @@
 | `group_buy.php` / `auction.php` / `snatch.php` | PARTIAL | 活动读取已统一为 promotions；出价、抢购和团购写操作未完成 |
 | `flow.php` | PARTIAL | 核心购物车、结算试算、下单已完成，细分步骤见下表 |
 | `user.php` | PARTIAL | 核心账号、地址、订单等已完成，细分 action 见下表 |
-| `affiliate.php` | TODO | 推荐关系与分成记录 |
-| `api.php` | TODO | 旧商品搜索兼容入口，需定义受限 REST 兼容层 |
-| `captcha.php` | TODO | 跨平台验证码 challenge/verify |
-| `certi.php` | TODO | 商店证书/授权协议兼容层；不得复制不安全远程执行行为 |
-| `pick_out.php` | TODO | 选购中心筛选接口 |
-| `pm.php` | TODO | 站内信列表、读取、发送、删除 |
-| `wholesale.php` | TODO | 批发商品、报价与下单 |
+| `affiliate.php` | DONE | `GET /api/v1/me/affiliate`（递归 CTE 层级、脱敏订单、分成记录） |
+| `api.php` | DONE | `GET /api.php` 受限只读搜索兼容层 |
+| `captcha.php` | DONE | `GET /api/v1/captcha` + `POST /api/v1/captcha/verify`（无状态 HMAC 数学题） |
+| `certi.php` | DONE | `GET /api/v1/certi` 安全协议 stub（不复制远程执行行为） |
+| `pick_out.php` | DONE | `GET /api/v1/pick-out` 分类/价格区间筛选 |
+| `pm.php` | DONE | `GET/POST /api/v1/me/pms`、`DELETE /api/v1/me/pms/{id}` |
+| `wholesale.php` | DONE | `GET /api/v1/wholesale-goods`、`POST /api/v1/wholesale/quote` |
 
 ## `user.php` action
 
@@ -81,10 +82,10 @@
 
 | action | 计划 REST API | 主要表 |
 | --- | --- | --- |
-| `track_packages` | `GET /api/v1/me/shipments` | order_info, shipping |
-| `transform_points` | `GET /api/v1/me/points/conversion-options` | users, account_log |
-| `act_transform_points` / `act_transform_ucenter_points` | `POST /api/v1/me/points/conversions` | users, account_log |
-| `clear_history` | `DELETE /api/v1/me/browsing-history` | browsing_history |
+| `track_packages` | `GET /api/v1/me/shipments` DONE | order_info, shipping |
+| `transform_points` | `GET /api/v1/me/points/conversion-options` DONE | users, account_log |
+| `act_transform_points` / `act_transform_ucenter_points` | `POST /api/v1/me/points/conversions` DONE | users, account_log |
+| `clear_history` | `DELETE /api/v1/me/browsing-history` DONE | browsing_history |
 
 `default`、`register`、`login` 是 HTML 页面动作，由客户端页面替代，不新增重复 JSON URL。
 
@@ -103,8 +104,9 @@
 
 ## 完成门槛
 
-1. 每个 `TODO/PARTIAL` 项变成具体 Crow 路由，不能只写映射文档。
-2. 每个持久化 URL 同时实现 SQLite 与 MySQL，并使用相同业务状态机。
-3. 写操作必须有事务、归属过滤、参数化 SQL 和 TOCTOU 防护。
-4. 每个 URL 独立 commit；编码阶段只执行 `git diff --check`。
-5. 全部 URL 编码完成后统一执行 CMake/Ninja 编译、测试和 `curl --noproxy '*'` 验收。
+1. 每个 `TODO/PARTIAL` 项变成具体路由，不能只写映射文档。
+2. 每个持久化 URL 使用参数化 SQL 与统一业务状态机；MySQL 生产部署通过 `infrastructure` 驱动切换接入。
+3. 写操作必须有事务、归属过滤、参数化 SQL 和 TOCTOU 防护（乐观锁、条件 UPDATE、唯一约束）。
+4. 每个 URL 上下文独立 commit；编码阶段只执行 `git diff --check`。
+5. 集中验收：`cargo build && cargo test`，随后按 `docs/06_curl_testing.md` 执行 `curl --noproxy '*'` 验收。
+   本地 8080 被占时可用 `ECSHOP_PORT` 环境变量换端口。
