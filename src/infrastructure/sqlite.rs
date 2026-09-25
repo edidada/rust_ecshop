@@ -16,5 +16,7 @@ pub fn open_sqlite(path: &str) -> anyhow::Result<SharedDb> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     let schema = include_str!("../../docs/sql/sqlite/001_ecshop_catalog.sql");
     conn.execute_batch(schema)?;
+    let compat = include_str!("../../docs/sql/sqlite/002_compat.sql");
+    conn.execute_batch(compat)?;
     Ok(Arc::new(Mutex::new(conn)))
 }

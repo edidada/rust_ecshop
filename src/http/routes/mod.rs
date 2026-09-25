@@ -1,6 +1,7 @@
 pub mod account;
 pub mod auth;
 pub mod cart;
+pub mod compat;
 pub mod community;
 pub mod content;
 pub mod goods;
@@ -123,4 +124,19 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/me/group-buys/:id", get(order::me_group_buy_detail))
         // payment callback
         .route("/api/v1/payments/:provider/callback", post(payment::payment_callback))
+        // compat and supplementary URLs
+        .route("/api/v1/me/affiliate", get(compat::affiliate))
+        .route("/api/v1/me/shipments", get(compat::shipments))
+        .route("/api/v1/me/points/conversion-options", get(compat::points_options))
+        .route("/api/v1/me/points/conversions", post(compat::points_convert))
+        .route("/api/v1/me/browsing-history", delete(compat::browsing_history_clear))
+        .route("/api/v1/me/pms", get(compat::pm_list).post(compat::pm_create))
+        .route("/api/v1/me/pms/:id", delete(compat::pm_delete))
+        .route("/api/v1/pick-out", get(compat::pick_out))
+        .route("/api/v1/wholesale-goods", get(compat::wholesale_goods))
+        .route("/api/v1/wholesale/quote", post(compat::wholesale_quote))
+        .route("/api/v1/captcha", get(compat::captcha_issue))
+        .route("/api/v1/captcha/verify", post(compat::captcha_verify))
+        .route("/api.php", get(compat::api_compat_search))
+        .route("/api/v1/certi", get(compat::certi))
 }
