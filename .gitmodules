@@ -1,0 +1,3 @@
+[submodule "third_party/shopex-ecshop"]
+	path = third_party/shopex-ecshop
+	url = https://gitee.com/softtomorrow/ecshop
