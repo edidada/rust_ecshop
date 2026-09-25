@@ -21,6 +21,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check
         run: cargo check --all-targets
+      - name: Crypto dependency duplicates check
+        shell: bash
+        run: |
+          if cargo tree -d | grep -E '^(sha2|hmac|digest|pbkdf2|sha1) v'; then
+            echo "::error::Duplicate RustCrypto crates in dependency tree (trait versions would mismatch)"
+            exit 1
+          fi
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Build

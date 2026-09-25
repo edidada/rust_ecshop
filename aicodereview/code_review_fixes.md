@@ -97,6 +97,21 @@ cargo clippy --all-targets -- -D warnings   # 通过，0 警告
 cargo test --all-targets                    # 13 passed, 0 failed
 ```
 
+### RustCrypto 依赖版本重复检查（pbkdf2 引入后的补充确认）
+
+背景：`pbkdf2 0.12` 通过 `hmac 0.12`/`digest 0.10` 与 `sha2 0.10` 的 trait 对接，
+若依赖树同时存在 `sha2 0.9` 等旧版本，会编译报“同名不同类型”或悄悄膨胀二进制。
+
+```text
+cargo tree -i sha2 / hmac / pbkdf2   # 均仅一个版本：sha2 0.10.9、hmac 0.12.1、pbkdf2 0.12.2
+cargo tree -d                        # 仅有 getrandom/syn/tower 等第三方传递依赖的正常重复，
+                                     # 与 RustCrypto trait 对接无关
+```
+
+结论：**已确认 `cargo tree -d` 无重复的 sha2/hmac/digest/pbkdf2**。
+防回归措施：两个 CI workflow 新增 "Crypto dependency duplicates check" 步骤，
+依赖树中出现重复的 RustCrypto crate 即失败。
+
 新增/变更测试一览：
 - `shared::util::tests` ×4（正负金额、i64::MIN、money 解析）
 - `infrastructure::crypto::tests` ×5（哈希往返、随机盐、畸形哈希、SHA-256/HMAC 向量）
