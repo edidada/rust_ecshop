@@ -1,2 +1,2 @@
 pub mod crypto;
-pub mod sqlite;
+pub mod db;

@@ -3,7 +3,6 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -12,14 +11,10 @@ use crate::http::routes::auth::insert_outbox;
 use crate::http::state::AppState;
 use crate::infrastructure::crypto;
 use crate::shared::error::AppError;
+use crate::shared::rbutil::{
+    col_bool, col_i64, col_opt_i64, col_str, col_cents, e, insert_id, q, q1,
+};
 use crate::shared::util::{cents_to_string, parse_money_cents, unix_now};
-
-/// Row tuple for one claimed bonus of the current user.
-type BonusRow = (i64, i64, String, i64, i64, i64, i64, i64);
-
-fn db_err(e: rusqlite::Error) -> AppError {
-    AppError::Internal(e.into())
-}
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
@@ -60,50 +55,55 @@ pub async fn address_create(
     if body.consignee.is_empty() || body.address.is_empty() || body.mobile.is_empty() {
         return Err(AppError::Validation("consignee/address/mobile are required".to_string()));
     }
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        for (level, rid) in [
-            ("country", body.country_id),
-            ("province", body.province_id),
-            ("city", body.city_id),
-            ("district", body.district_id),
-        ] {
-            if rid > 0 {
-                let ok: i64 = tx
-                    .query_row("SELECT COUNT(*) FROM ecs_region WHERE region_id = ?1", [rid], |r| r.get(0))
-                    .map_err(db_err)?;
-                if ok == 0 {
-                    return Err(AppError::Validation(format!("{level} region not found")));
-                }
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    for (level, rid) in [
+        ("country", body.country_id),
+        ("province", body.province_id),
+        ("city", body.city_id),
+        ("district", body.district_id),
+    ] {
+        if rid > 0 {
+            let exists = q1(
+                &tx,
+                "SELECT COUNT(*) AS cnt FROM ecs_region WHERE region_id = ?",
+                vec![json!(rid)],
+            )
+            .await?
+            .map(|r| col_i64(&r, "cnt"))
+            .unwrap_or(0);
+            if exists == 0 {
+                return Err(AppError::Validation(format!("{level} region not found")));
             }
         }
-        if body.is_default {
-            tx.execute(
-                "UPDATE ecs_user_address SET is_default = 0 WHERE user_id = ?1",
-                [user_id],
-            )
-            .map_err(db_err)?;
-        }
-        tx.execute(
-            "INSERT INTO ecs_user_address (user_id, consignee, country_id, province_id, city_id, district_id, address, zipcode, mobile, is_default)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![
-                user_id, body.consignee, body.country_id, body.province_id, body.city_id,
-                body.district_id, body.address, body.zipcode, body.mobile,
-                if body.is_default { 1 } else { 0 }
-            ],
+    }
+    if body.is_default {
+        e(
+            &tx,
+            "UPDATE ecs_user_address SET is_default = 0 WHERE user_id = ?",
+            vec![json!(auth.user_id)],
         )
-        .map_err(db_err)?;
-        let address_id = tx.last_insert_rowid();
-        tx.commit().map_err(db_err)?;
-        Ok(json!({"id": address_id}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok((StatusCode::CREATED, Json(result)))
+        .await?;
+    }
+    let result = e(
+        &tx,
+        "INSERT INTO ecs_user_address (user_id, consignee, country_id, province_id, city_id, district_id, address, zipcode, mobile, is_default)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        vec![
+            json!(auth.user_id),
+            json!(body.consignee),
+            json!(body.country_id),
+            json!(body.province_id),
+            json!(body.city_id),
+            json!(body.district_id),
+            json!(body.address),
+            json!(body.zipcode),
+            json!(body.mobile),
+            json!(if body.is_default { 1 } else { 0 }),
+        ],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(json!({"id": insert_id(&result)}))))
 }
 
 /// GET /api/v1/me/addresses
@@ -111,38 +111,31 @@ pub async fn address_list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let user_id = auth.user_id;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT address_id, consignee, country_id, province_id, city_id, district_id, address, zipcode, mobile, is_default
-                 FROM ecs_user_address WHERE user_id = ?1 ORDER BY is_default DESC, address_id",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([user_id], |r| {
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "consignee": r.get::<_, String>(1)?,
-                    "country_id": r.get::<_, i64>(2)?,
-                    "province_id": r.get::<_, i64>(3)?,
-                    "city_id": r.get::<_, i64>(4)?,
-                    "district_id": r.get::<_, i64>(5)?,
-                    "address": r.get::<_, String>(6)?,
-                    "zipcode": r.get::<_, String>(7)?,
-                    "mobile": r.get::<_, String>(8)?,
-                    "is_default": r.get::<_, i64>(9)? != 0,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({"items": items}))
+    let items = q(
+        state.rb,
+        "SELECT address_id AS address_id, consignee AS consignee, country_id AS country_id, province_id AS province_id,
+                city_id AS city_id, district_id AS district_id, address AS address, zipcode AS zipcode, mobile AS mobile, is_default AS is_default
+         FROM ecs_user_address WHERE user_id = ? ORDER BY is_default DESC, address_id",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "address_id"),
+            "consignee": col_str(&r, "consignee"),
+            "country_id": col_i64(&r, "country_id"),
+            "province_id": col_i64(&r, "province_id"),
+            "city_id": col_i64(&r, "city_id"),
+            "district_id": col_i64(&r, "district_id"),
+            "address": col_str(&r, "address"),
+            "zipcode": col_str(&r, "zipcode"),
+            "mobile": col_str(&r, "mobile"),
+            "is_default": col_bool(&r, "is_default"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"items": items})))
 }
 
 /// PATCH /api/v1/me/addresses/{id}
@@ -153,39 +146,39 @@ pub async fn address_update(
     Json(body): Json<AddressRequest>,
 ) -> Result<StatusCode, AppError> {
     let address_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        if body.is_default {
-            tx.execute(
-                "UPDATE ecs_user_address SET is_default = 0 WHERE user_id = ?1",
-                [user_id],
-            )
-            .map_err(db_err)?;
-        }
-        let updated = tx
-            .execute(
-                "UPDATE ecs_user_address SET consignee = ?1, country_id = ?2, province_id = ?3, city_id = ?4,
-                 district_id = ?5, address = ?6, zipcode = ?7, mobile = ?8, is_default = ?9
-                 WHERE address_id = ?10 AND user_id = ?11",
-                rusqlite::params![
-                    body.consignee, body.country_id, body.province_id, body.city_id, body.district_id,
-                    body.address, body.zipcode, body.mobile,
-                    if body.is_default { 1 } else { 0 },
-                    address_id, user_id
-                ],
-            )
-            .map_err(db_err)?;
-        if updated == 0 {
-            return Err(AppError::NotFound("address not found".to_string()));
-        }
-        tx.commit().map_err(db_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    if body.is_default {
+        e(
+            &tx,
+            "UPDATE ecs_user_address SET is_default = 0 WHERE user_id = ?",
+            vec![json!(auth.user_id)],
+        )
+        .await?;
+    }
+    let updated = e(
+        &tx,
+        "UPDATE ecs_user_address SET consignee = ?, country_id = ?, province_id = ?, city_id = ?,
+         district_id = ?, address = ?, zipcode = ?, mobile = ?, is_default = ?
+         WHERE address_id = ? AND user_id = ?",
+        vec![
+            json!(body.consignee),
+            json!(body.country_id),
+            json!(body.province_id),
+            json!(body.city_id),
+            json!(body.district_id),
+            json!(body.address),
+            json!(body.zipcode),
+            json!(body.mobile),
+            json!(if body.is_default { 1 } else { 0 }),
+            json!(address_id),
+            json!(auth.user_id),
+        ],
+    )
+    .await?;
+    if updated.rows_affected == 0 {
+        return Err(AppError::NotFound("address not found".to_string()));
+    }
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -196,23 +189,15 @@ pub async fn address_delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let address_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let conn = db.blocking_lock();
-        let deleted = conn
-            .execute(
-                "DELETE FROM ecs_user_address WHERE address_id = ?1 AND user_id = ?2",
-                [address_id, user_id],
-            )
-            .map_err(db_err)?;
-        if deleted == 0 {
-            return Err(AppError::NotFound("address not found".to_string()));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let deleted = e(
+        state.rb,
+        "DELETE FROM ecs_user_address WHERE address_id = ? AND user_id = ?",
+        vec![json!(address_id), json!(auth.user_id)],
+    )
+    .await?;
+    if deleted.rows_affected == 0 {
+        return Err(AppError::NotFound("address not found".to_string()));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -234,45 +219,40 @@ pub async fn favorite_create(
     if body.goods_id <= 0 {
         return Err(AppError::Validation("goods_id must be positive".to_string()));
     }
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    let goods_id = body.goods_id;
-    let now = unix_now();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let ok: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM ecs_goods WHERE goods_id = ?1 AND is_on_sale = 1 AND is_delete = 0",
-                [goods_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if ok == 0 {
-            return Err(AppError::NotFound("goods not found".to_string()));
-        }
-        let exists: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM ecs_collect_goods WHERE user_id = ?1 AND goods_id = ?2",
-                [user_id, goods_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if exists > 0 {
-            return Err(AppError::Conflict("goods already in favorites".to_string()));
-        }
-        tx.execute(
-            "INSERT INTO ecs_collect_goods (user_id, goods_id, add_time) VALUES (?1, ?2, ?3)",
-            [user_id, goods_id, now],
-        )
-        .map_err(db_err)?;
-        let rec_id = tx.last_insert_rowid();
-        tx.commit().map_err(db_err)?;
-        Ok(json!({"id": rec_id, "goods_id": goods_id, "attention": false}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok((StatusCode::CREATED, Json(result)))
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let ok = q1(
+        &tx,
+        "SELECT COUNT(*) AS cnt FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
+        vec![json!(body.goods_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "cnt"))
+    .unwrap_or(0);
+    if ok == 0 {
+        return Err(AppError::NotFound("goods not found".to_string()));
+    }
+    let exists = q1(
+        &tx,
+        "SELECT COUNT(*) AS cnt FROM ecs_collect_goods WHERE user_id = ? AND goods_id = ?",
+        vec![json!(auth.user_id), json!(body.goods_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "cnt"))
+    .unwrap_or(0);
+    if exists > 0 {
+        return Err(AppError::Conflict("goods already in favorites".to_string()));
+    }
+    let result = e(
+        &tx,
+        "INSERT INTO ecs_collect_goods (user_id, goods_id, add_time) VALUES (?, ?, ?)",
+        vec![json!(auth.user_id), json!(body.goods_id), json!(unix_now())],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"id": insert_id(&result), "goods_id": body.goods_id, "attention": false})),
+    ))
 }
 
 /// GET /api/v1/me/favorites
@@ -280,36 +260,28 @@ pub async fn favorite_list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let user_id = auth.user_id;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT c.rec_id, c.goods_id, g.goods_name, g.shop_price, g.goods_thumb, c.is_attention
-                 FROM ecs_collect_goods c JOIN ecs_goods g ON g.goods_id = c.goods_id
-                 WHERE c.user_id = ?1 ORDER BY c.rec_id DESC",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([user_id], |r| {
-                let price: f64 = r.get(3)?;
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "goods_id": r.get::<_, i64>(1)?,
-                    "name": r.get::<_, String>(2)?,
-                    "price": cents_to_string((price * 100.0).round() as i64),
-                    "thumb": r.get::<_, String>(4)?,
-                    "attention": r.get::<_, i64>(5)? != 0,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({"items": items}))
+    let items = q(
+        state.rb,
+        "SELECT c.rec_id AS rec_id, c.goods_id AS goods_id, g.goods_name AS goods_name, g.shop_price AS shop_price,
+                g.goods_thumb AS goods_thumb, c.is_attention AS is_attention
+         FROM ecs_collect_goods c JOIN ecs_goods g ON g.goods_id = c.goods_id
+         WHERE c.user_id = ? ORDER BY c.rec_id DESC",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "rec_id"),
+            "goods_id": col_i64(&r, "goods_id"),
+            "name": col_str(&r, "goods_name"),
+            "price": cents_to_string(col_cents(&r, "shop_price")),
+            "thumb": col_str(&r, "goods_thumb"),
+            "attention": col_bool(&r, "is_attention"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"items": items})))
 }
 
 #[derive(Deserialize)]
@@ -325,23 +297,19 @@ pub async fn favorite_update(
     Json(body): Json<FavoritePatchRequest>,
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let conn = db.blocking_lock();
-        let updated = conn
-            .execute(
-                "UPDATE ecs_collect_goods SET is_attention = ?1 WHERE rec_id = ?2 AND user_id = ?3",
-                rusqlite::params![if body.attention { 1 } else { 0 }, rec_id, user_id],
-            )
-            .map_err(db_err)?;
-        if updated == 0 {
-            return Err(AppError::NotFound("favorite not found".to_string()));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let updated = e(
+        state.rb,
+        "UPDATE ecs_collect_goods SET is_attention = ? WHERE rec_id = ? AND user_id = ?",
+        vec![
+            json!(if body.attention { 1 } else { 0 }),
+            json!(rec_id),
+            json!(auth.user_id),
+        ],
+    )
+    .await?;
+    if updated.rows_affected == 0 {
+        return Err(AppError::NotFound("favorite not found".to_string()));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -352,23 +320,15 @@ pub async fn favorite_delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let conn = db.blocking_lock();
-        let deleted = conn
-            .execute(
-                "DELETE FROM ecs_collect_goods WHERE rec_id = ?1 AND user_id = ?2",
-                [rec_id, user_id],
-            )
-            .map_err(db_err)?;
-        if deleted == 0 {
-            return Err(AppError::NotFound("favorite not found".to_string()));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let deleted = e(
+        state.rb,
+        "DELETE FROM ecs_collect_goods WHERE rec_id = ? AND user_id = ?",
+        vec![json!(rec_id), json!(auth.user_id)],
+    )
+    .await?;
+    if deleted.rows_affected == 0 {
+        return Err(AppError::NotFound("favorite not found".to_string()));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -407,46 +367,47 @@ pub async fn booking_create(
     if body.goods_number < 1 {
         return Err(AppError::Validation("goods_number must be at least 1".to_string()));
     }
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    let now = unix_now();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let ok: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM ecs_goods WHERE goods_id = ?1 AND is_on_sale = 1 AND is_delete = 0",
-                [body.goods_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if ok == 0 {
-            return Err(AppError::NotFound("goods not found".to_string()));
-        }
-        // Unique (user, goods) prevents TOCTOU duplicates.
-        let inserted = tx
-            .execute(
-                "INSERT INTO ecs_booking_goods (user_id, email, link_man, tel, goods_id, goods_desc, goods_number, booking_time)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![
-                    user_id, body.email, body.linkman, body.telephone, body.goods_id,
-                    body.description, body.goods_number, now
-                ],
-            );
-        match inserted {
-            Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let ok = q1(
+        &tx,
+        "SELECT COUNT(*) AS cnt FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
+        vec![json!(body.goods_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "cnt"))
+    .unwrap_or(0);
+    if ok == 0 {
+        return Err(AppError::NotFound("goods not found".to_string()));
+    }
+    // Unique (user, goods) prevents TOCTOU duplicates.
+    let result = e(
+        &tx,
+        "INSERT INTO ecs_booking_goods (user_id, email, link_man, tel, goods_id, goods_desc, goods_number, booking_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        vec![
+            json!(auth.user_id),
+            json!(body.email),
+            json!(body.linkman),
+            json!(body.telephone),
+            json!(body.goods_id),
+            json!(body.description),
+            json!(body.goods_number),
+            json!(unix_now()),
+        ],
+    )
+    .await;
+    let rec_id = match result {
+        Ok(r) => insert_id(&r),
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("UNIQUE") || msg.contains("unique") {
                 return Err(AppError::Conflict("booking already exists for this goods".to_string()));
             }
-            Err(e) => return Err(db_err(e)),
+            return Err(err);
         }
-        let rec_id = tx.last_insert_rowid();
-        tx.commit().map_err(db_err)?;
-        Ok(json!({"id": rec_id}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok((StatusCode::CREATED, Json(result)))
+    };
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(json!({"id": rec_id}))))
 }
 
 /// GET /api/v1/me/bookings
@@ -454,36 +415,29 @@ pub async fn booking_list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let user_id = auth.user_id;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT b.rec_id, b.goods_id, g.goods_name, b.goods_number, b.booking_time, b.is_dispose, b.dispose_note
-                 FROM ecs_booking_goods b JOIN ecs_goods g ON g.goods_id = b.goods_id
-                 WHERE b.user_id = ?1 ORDER BY b.booking_time DESC",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([user_id], |r| {
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "goods_id": r.get::<_, i64>(1)?,
-                    "goods_name": r.get::<_, String>(2)?,
-                    "goods_number": r.get::<_, i64>(3)?,
-                    "booking_time": r.get::<_, i64>(4)?,
-                    "is_dispose": r.get::<_, i64>(5)? != 0,
-                    "dispose_note": r.get::<_, String>(6)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({"items": items}))
+    let items = q(
+        state.rb,
+        "SELECT b.rec_id AS rec_id, b.goods_id AS goods_id, g.goods_name AS goods_name, b.goods_number AS goods_number,
+                b.booking_time AS booking_time, b.is_dispose AS is_dispose, b.dispose_note AS dispose_note
+         FROM ecs_booking_goods b JOIN ecs_goods g ON g.goods_id = b.goods_id
+         WHERE b.user_id = ? ORDER BY b.booking_time DESC",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "rec_id"),
+            "goods_id": col_i64(&r, "goods_id"),
+            "goods_name": col_str(&r, "goods_name"),
+            "goods_number": col_i64(&r, "goods_number"),
+            "booking_time": col_i64(&r, "booking_time"),
+            "is_dispose": col_bool(&r, "is_dispose"),
+            "dispose_note": col_str(&r, "dispose_note"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"items": items})))
 }
 
 /// DELETE /api/v1/me/bookings/{id}
@@ -493,23 +447,15 @@ pub async fn booking_delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let conn = db.blocking_lock();
-        let deleted = conn
-            .execute(
-                "DELETE FROM ecs_booking_goods WHERE rec_id = ?1 AND user_id = ?2",
-                [rec_id, user_id],
-            )
-            .map_err(db_err)?;
-        if deleted == 0 {
-            return Err(AppError::NotFound("booking not found".to_string()));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let deleted = e(
+        state.rb,
+        "DELETE FROM ecs_booking_goods WHERE rec_id = ? AND user_id = ?",
+        vec![json!(rec_id), json!(auth.user_id)],
+    )
+    .await?;
+    if deleted.rows_affected == 0 {
+        return Err(AppError::NotFound("booking not found".to_string()));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -535,49 +481,32 @@ pub async fn bonus_claim(
     let sn_value: i64 = sn
         .parse()
         .map_err(|_| AppError::Validation("bonus_sn is out of range".to_string()))?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
     let now = unix_now();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let row: Option<i64> = tx
-            .query_row(
-                "SELECT b.bonus_id FROM ecs_user_bonus b JOIN ecs_bonus_type t ON t.type_id = b.bonus_type_id
-                 WHERE b.bonus_sn = ?1",
-                [sn_value],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let Some(bonus_id) = row else {
-            return Err(AppError::NotFound("bonus not found".to_string()));
-        };
-        let use_end: i64 = tx
-            .query_row(
-                "SELECT t.use_end_date FROM ecs_user_bonus b JOIN ecs_bonus_type t ON t.type_id = b.bonus_type_id WHERE b.bonus_id = ?1",
-                [bonus_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if now > use_end {
-            return Err(AppError::Conflict("bonus is expired".to_string()));
-        }
-        // Atomic claim: user_id=0 is the unclaimed marker.
-        let claimed = tx
-            .execute(
-                "UPDATE ecs_user_bonus SET user_id = ?1 WHERE bonus_id = ?2 AND user_id = 0",
-                [user_id, bonus_id],
-            )
-            .map_err(db_err)?;
-        if claimed == 0 {
-            return Err(AppError::Conflict("bonus already claimed".to_string()));
-        }
-        tx.commit().map_err(db_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let row = q1(
+        &tx,
+        "SELECT b.bonus_id AS bonus_id, t.use_end_date AS use_end_date
+         FROM ecs_user_bonus b JOIN ecs_bonus_type t ON t.type_id = b.bonus_type_id
+         WHERE b.bonus_sn = ?",
+        vec![json!(sn_value)],
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("bonus not found".to_string()))?;
+    let bonus_id = col_i64(&row, "bonus_id");
+    if now > col_i64(&row, "use_end_date") {
+        return Err(AppError::Conflict("bonus is expired".to_string()));
+    }
+    // Atomic claim: user_id=0 is the unclaimed marker.
+    let claimed = e(
+        &tx,
+        "UPDATE ecs_user_bonus SET user_id = ? WHERE bonus_id = ? AND user_id = 0",
+        vec![json!(auth.user_id), json!(bonus_id)],
+    )
+    .await?;
+    if claimed.rows_affected == 0 {
+        return Err(AppError::Conflict("bonus already claimed".to_string()));
+    }
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -586,61 +515,41 @@ pub async fn bonus_list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let user_id = auth.user_id;
     let now = unix_now();
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT b.bonus_id, b.bonus_sn, t.type_name, t.type_money, t.use_start_date, t.use_end_date, b.order_id, b.used_time
-                 FROM ecs_user_bonus b JOIN ecs_bonus_type t ON t.type_id = b.bonus_type_id
-                 WHERE b.user_id = ?1 ORDER BY b.bonus_id DESC",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([user_id], |r| {
-                let money: f64 = r.get(3)?;
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    (money * 100.0).round() as i64,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, i64>(6)?,
-                    r.get::<_, i64>(7)?,
-                ))
-            })
-            .map_err(db_err)?;
-        let rows: Vec<BonusRow> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        let items: Vec<Value> = rows
-            .into_iter()
-            .map(|(id, sn, name, money, use_start, use_end, order_id, used_time)| {
-                let status = if used_time > 0 {
-                    "used"
-                } else if now < use_start {
-                    "not_started"
-                } else if now > use_end {
-                    "expired"
-                } else {
-                    "available"
-                };
-                json!({
-                    "id": id,
-                    "bonus_sn": sn.to_string(),
-                    "type_name": name,
-                    "amount": cents_to_string(money),
-                    "status": status,
-                    "order_id": if used_time > 0 { Some(order_id) } else { None },
-                })
-            })
-            .collect();
-        Ok(json!({"items": items}))
+    let items = q(
+        state.rb,
+        "SELECT b.bonus_id AS bonus_id, b.bonus_sn AS bonus_sn, t.type_name AS type_name, t.type_money AS type_money,
+                t.use_start_date AS use_start_date, t.use_end_date AS use_end_date, b.order_id AS order_id, b.used_time AS used_time
+         FROM ecs_user_bonus b JOIN ecs_bonus_type t ON t.type_id = b.bonus_type_id
+         WHERE b.user_id = ? ORDER BY b.bonus_id DESC",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        let used_time = col_i64(&r, "used_time");
+        let use_start = col_i64(&r, "use_start_date");
+        let use_end = col_i64(&r, "use_end_date");
+        let status = if used_time > 0 {
+            "used"
+        } else if now < use_start {
+            "not_started"
+        } else if now > use_end {
+            "expired"
+        } else {
+            "available"
+        };
+        json!({
+            "id": col_i64(&r, "bonus_id"),
+            "bonus_sn": col_i64(&r, "bonus_sn").to_string(),
+            "type_name": col_str(&r, "type_name"),
+            "amount": cents_to_string(col_cents(&r, "type_money")),
+            "status": status,
+            "order_id": if used_time > 0 { Some(col_i64(&r, "order_id")) } else { None },
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"items": items})))
 }
 
 // ---------------------------------------------------------------------------
@@ -654,35 +563,36 @@ pub async fn email_verification_request(
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     let token = crypto::random_token(32);
     let token_hash = crypto::sha256_hex(token.as_bytes());
-    let db = state.db.clone();
-    let user_id = auth.user_id;
     let now = unix_now();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let email: String = tx
-            .query_row(
-                "SELECT email FROM ecs_users WHERE user_id = ?1",
-                [user_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        // Duplicate requests atomically replace the old token.
-        tx.execute(
-            "INSERT INTO ecs_email_verification_tokens (user_id, token_hash, expires_at, created_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(user_id) DO UPDATE SET token_hash = ?2, expires_at = ?3, created_at = ?4, consumed_at = NULL",
-            rusqlite::params![user_id, token_hash, now + 86_400, now],
-        )
-        .map_err(db_err)?;
-        insert_outbox(&tx, Some(user_id), &email, "verify_email", &json!({"token": token}))
-            .map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
-        Ok(json!({"status": "queued"}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok((StatusCode::ACCEPTED, Json(result)))
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let email = q1(
+        &tx,
+        "SELECT email AS email FROM ecs_users WHERE user_id = ?",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .map(|r| col_str(&r, "email"))
+    .unwrap_or_default();
+    // Duplicate requests atomically replace the old token.
+    e(
+        &tx,
+        "INSERT INTO ecs_email_verification_tokens (user_id, token_hash, expires_at, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(user_id) DO UPDATE SET token_hash = ?, expires_at = ?, created_at = ?, consumed_at = NULL",
+        vec![
+            json!(auth.user_id),
+            json!(token_hash),
+            json!(now + 86_400),
+            json!(now),
+            json!(token_hash),
+            json!(now + 86_400),
+            json!(now),
+        ],
+    )
+    .await?;
+    insert_outbox(&tx, Some(auth.user_id), &email, "verify_email", &json!({"token": token})).await?;
+    tx.commit().await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"status": "queued"}))))
 }
 
 #[derive(Deserialize)]
@@ -699,44 +609,39 @@ pub async fn email_verification_confirm(
         return Err(AppError::Validation("token must be 64 hex chars".to_string()));
     }
     let token_hash = crypto::sha256_hex(body.token.as_bytes());
-    let db = state.db.clone();
     let now = unix_now();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let row: Option<i64> = tx
-            .query_row(
-                "SELECT user_id FROM ecs_email_verification_tokens
-                 WHERE token_hash = ?1 AND consumed_at IS NULL AND expires_at > ?2",
-                rusqlite::params![token_hash, now],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let Some(user_id) = row else {
-            return Err(AppError::Conflict("invalid or expired token".to_string()));
-        };
-        tx.execute(
-            "INSERT OR IGNORE INTO ecs_email_verified_users (user_id, verified_at) VALUES (?1, ?2)",
-            [user_id, now],
-        )
-        .map_err(db_err)?;
-        let consumed = tx
-            .execute(
-                "UPDATE ecs_email_verification_tokens SET consumed_at = ?1 WHERE token_hash = ?2 AND consumed_at IS NULL",
-                rusqlite::params![now, token_hash],
-            )
-            .map_err(db_err)?;
-        if consumed != 1 {
-            return Err(AppError::Conflict("token already consumed".to_string()));
-        }
-        tx.execute("UPDATE ecs_users SET is_validated = 1 WHERE user_id = ?1", [user_id])
-            .map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let row = q1(
+        &tx,
+        "SELECT user_id AS user_id FROM ecs_email_verification_tokens
+         WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?",
+        vec![json!(token_hash), json!(now)],
+    )
+    .await?
+    .ok_or_else(|| AppError::Conflict("invalid or expired token".to_string()))?;
+    let user_id = col_i64(&row, "user_id");
+    e(
+        &tx,
+        "INSERT OR IGNORE INTO ecs_email_verified_users (user_id, verified_at) VALUES (?, ?)",
+        vec![json!(user_id), json!(now)],
+    )
+    .await?;
+    let consumed = e(
+        &tx,
+        "UPDATE ecs_email_verification_tokens SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL",
+        vec![json!(now), json!(token_hash)],
+    )
+    .await?;
+    if consumed.rows_affected != 1 {
+        return Err(AppError::Conflict("token already consumed".to_string()));
+    }
+    e(
+        &tx,
+        "UPDATE ecs_users SET is_validated = 1 WHERE user_id = ?",
+        vec![json!(user_id)],
+    )
+    .await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -754,38 +659,33 @@ pub async fn password_reset_request(
     State(state): State<AppState>,
     Json(body): Json<PasswordResetRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    let db = state.db.clone();
-    let email = body.email;
     let now = unix_now();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let user: Option<i64> = tx
-            .query_row(
-                "SELECT user_id FROM ecs_users WHERE email = ?1",
-                [&email],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-        if let Some(user_id) = user {
-            let token = crypto::random_token(32);
-            let token_hash = crypto::sha256_hex(token.as_bytes());
-            tx.execute("DELETE FROM ecs_password_reset_tokens WHERE user_id = ?1", [user_id])
-                .map_err(db_err)?;
-            tx.execute(
-                "INSERT INTO ecs_password_reset_tokens (user_id, token_hash, expires_at, created_at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![user_id, token_hash, now + 3_600, now],
-            )
-            .map_err(db_err)?;
-            insert_outbox(&tx, Some(user_id), &email, "password_reset", &json!({"token": token}))
-                .map_err(db_err)?;
-        }
-        tx.commit().map_err(db_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let user = q1(
+        &tx,
+        "SELECT user_id AS user_id FROM ecs_users WHERE email = ?",
+        vec![json!(body.email)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "user_id"));
+    if let Some(user_id) = user {
+        let token = crypto::random_token(32);
+        let token_hash = crypto::sha256_hex(token.as_bytes());
+        e(
+            &tx,
+            "DELETE FROM ecs_password_reset_tokens WHERE user_id = ?",
+            vec![json!(user_id)],
+        )
+        .await?;
+        e(
+            &tx,
+            "INSERT INTO ecs_password_reset_tokens (user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            vec![json!(user_id), json!(token_hash), json!(now + 3_600), json!(now)],
+        )
+        .await?;
+        insert_outbox(&tx, Some(user_id), &body.email, "password_reset", &json!({"token": token})).await?;
+    }
+    tx.commit().await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "accepted"}))))
 }
 
@@ -806,44 +706,34 @@ pub async fn password_reset_confirm(
     }
     let token_hash = crypto::sha256_hex(body.token.as_bytes());
     let new_hash = crypto::hash_password(&body.new_password);
-    let db = state.db.clone();
     let now = unix_now();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let row: Option<i64> = tx
-            .query_row(
-                "SELECT user_id FROM ecs_password_reset_tokens
-                 WHERE token_hash = ?1 AND consumed_at IS NULL AND expires_at > ?2",
-                rusqlite::params![token_hash, now],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let Some(user_id) = row else {
-            return Err(AppError::Conflict("invalid or expired token".to_string()));
-        };
-        let consumed = tx
-            .execute(
-                "UPDATE ecs_password_reset_tokens SET consumed_at = ?1 WHERE token_hash = ?2 AND consumed_at IS NULL",
-                rusqlite::params![now, token_hash],
-            )
-            .map_err(db_err)?;
-        if consumed != 1 {
-            return Err(AppError::Conflict("token already consumed".to_string()));
-        }
-        tx.execute(
-            "UPDATE ecs_users SET password_hash = ?1 WHERE user_id = ?2",
-            rusqlite::params![new_hash, user_id],
-        )
-        .map_err(db_err)?;
-        tx.execute("DELETE FROM ecs_sessions WHERE user_id = ?1", [user_id])
-            .map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let row = q1(
+        &tx,
+        "SELECT user_id AS user_id FROM ecs_password_reset_tokens
+         WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?",
+        vec![json!(token_hash), json!(now)],
+    )
+    .await?
+    .ok_or_else(|| AppError::Conflict("invalid or expired token".to_string()))?;
+    let user_id = col_i64(&row, "user_id");
+    let consumed = e(
+        &tx,
+        "UPDATE ecs_password_reset_tokens SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL",
+        vec![json!(now), json!(token_hash)],
+    )
+    .await?;
+    if consumed.rows_affected != 1 {
+        return Err(AppError::Conflict("token already consumed".to_string()));
+    }
+    e(
+        &tx,
+        "UPDATE ecs_users SET password_hash = ? WHERE user_id = ?",
+        vec![json!(new_hash), json!(user_id)],
+    )
+    .await?;
+    crate::http::auth::revoke_user_sessions(&tx, user_id).await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -880,52 +770,45 @@ async fn newsletter_action(
     if email.is_empty() || email.len() > 120 {
         return Err(AppError::Validation("email must be 1-120 bytes".to_string()));
     }
-    let db = state.db.clone();
     let now = unix_now();
-    let action = action.to_string();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let existing: Option<(i64, Option<String>)> = tx
-            .query_row(
-                "SELECT status, token_hash FROM ecs_email_list WHERE email = ?1",
-                [&email],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let existing = q1(
+        &tx,
+        "SELECT status AS status FROM ecs_email_list WHERE email = ?",
+        vec![json!(email)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "status"));
+    let token = crypto::random_token(32);
+    let token_hash = crypto::sha256_hex(token.as_bytes());
+    match existing {
+        Some(status) => {
+            let subscribed = action == "subscribe";
+            // Idempotent: already subscribed/unsubscribed => accept without a new mail.
+            if (subscribed && status == 1) || (!subscribed && status == 0) {
+                tx.commit().await?;
+                return Ok((StatusCode::ACCEPTED, Json(json!({"status": "accepted"}))));
+            }
+            e(
+                &tx,
+                "UPDATE ecs_email_list SET token_hash = ?, pending_action = ?, token_expires_at = ?, updated_at = ? WHERE email = ?",
+                vec![json!(token_hash), json!(action), json!(now + 86_400), json!(now), json!(email)],
             )
-            .optional()
-            .map_err(db_err)?;
-        let token = crypto::random_token(32);
-        let token_hash = crypto::sha256_hex(token.as_bytes());
-        match existing {
-            Some((status, _)) => {
-                let subscribed = action == "subscribe";
-                // Idempotent: already subscribed/unsubscribed => accept without a new mail.
-                if (subscribed && status == 1) || (!subscribed && status == 0) {
-                    tx.commit().map_err(db_err)?;
-                    return Ok(());
-                }
-                tx.execute(
-                    "UPDATE ecs_email_list SET token_hash = ?1, pending_action = ?2, token_expires_at = ?3, updated_at = ?4 WHERE email = ?5",
-                    rusqlite::params![token_hash, action, now + 86_400, now, email],
-                )
-                .map_err(db_err)?;
-            }
-            None => {
-                tx.execute(
-                    "INSERT INTO ecs_email_list (email, status, token_hash, pending_action, token_expires_at, updated_at)
-                     VALUES (?1, 0, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![email, token_hash, action, now + 86_400, now],
-                )
-                .map_err(db_err)?;
-            }
+            .await?;
         }
-        let template = if action == "subscribe" { "newsletter_subscribe" } else { "newsletter_unsubscribe" };
-        insert_outbox(&tx, None, &email, template, &json!({"token": token})).map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+        None => {
+            e(
+                &tx,
+                "INSERT INTO ecs_email_list (email, status, token_hash, pending_action, token_expires_at, updated_at)
+                 VALUES (?, 0, ?, ?, ?, ?)",
+                vec![json!(email), json!(token_hash), json!(action), json!(now + 86_400), json!(now)],
+            )
+            .await?;
+        }
+    }
+    let template = if action == "subscribe" { "newsletter_subscribe" } else { "newsletter_unsubscribe" };
+    insert_outbox(&tx, None, &email, template, &json!({"token": token})).await?;
+    tx.commit().await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "accepted"}))))
 }
 
@@ -944,26 +827,19 @@ pub async fn newsletter_confirm(
         _ => return Err(AppError::NotFound("unknown confirm action".to_string())),
     };
     let token_hash = crypto::sha256_hex(body.token.as_bytes());
-    let db = state.db.clone();
     let now = unix_now();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let conn = db.blocking_lock();
-        let updated = conn
-            .execute(
-                "UPDATE ecs_email_list
-                 SET status = CASE WHEN ?1 = 'subscribe' THEN 1 ELSE 0 END,
-                     pending_action = '', token_hash = NULL, token_expires_at = NULL, updated_at = ?2
-                 WHERE token_hash = ?3 AND pending_action = ?1 AND token_expires_at > ?2",
-                rusqlite::params![pending, now, token_hash],
-            )
-            .map_err(db_err)?;
-        if updated != 1 {
-            return Err(AppError::Conflict("invalid or expired token".to_string()));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let updated = e(
+        state.rb,
+        "UPDATE ecs_email_list
+         SET status = CASE WHEN ? = 'subscribe' THEN 1 ELSE 0 END,
+             pending_action = '', token_hash = NULL, token_expires_at = NULL, updated_at = ?
+         WHERE token_hash = ? AND pending_action = ? AND token_expires_at > ?",
+        vec![json!(pending), json!(now), json!(token_hash), json!(pending), json!(now)],
+    )
+    .await?;
+    if updated.rows_affected != 1 {
+        return Err(AppError::Conflict("invalid or expired token".to_string()));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -994,68 +870,74 @@ pub async fn account_request_create(
     if body.kind != "deposit" && body.kind != "withdrawal" {
         return Err(AppError::Validation("kind must be deposit or withdrawal".to_string()));
     }
-    let db = state.db.clone();
-    let user_id = auth.user_id;
     let now = unix_now();
-    let kind = body.kind;
-    let payment_id = body.payment_id;
-    let note = body.note;
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let status = match kind.as_str() {
-            "deposit" => {
-                let pid = payment_id
-                    .ok_or_else(|| AppError::Validation("payment_id is required for deposits".to_string()))?;
-                let enabled: i64 = tx
-                    .query_row("SELECT enabled FROM ecs_payment WHERE pay_id = ?1", [pid], |r| r.get(0))
-                    .optional()
-                    .map_err(db_err)?
-                    .ok_or_else(|| AppError::NotFound("payment not found".to_string()))?;
-                if enabled != 1 {
-                    return Err(AppError::NotFound("payment not enabled".to_string()));
-                }
-                "pending_payment"
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let status = match body.kind.as_str() {
+        "deposit" => {
+            let pid = body
+                .payment_id
+                .ok_or_else(|| AppError::Validation("payment_id is required for deposits".to_string()))?;
+            let enabled = q1(
+                &tx,
+                "SELECT enabled AS enabled FROM ecs_payment WHERE pay_id = ?",
+                vec![json!(pid)],
+            )
+            .await?
+            .map(|r| col_i64(&r, "enabled"))
+            .ok_or_else(|| AppError::NotFound("payment not found".to_string()))?;
+            if enabled != 1 {
+                return Err(AppError::NotFound("payment not enabled".to_string()));
             }
-            _ => {
-                // Withdrawal: atomically freeze available balance.
-                let updated = tx
-                    .execute(
-                        "UPDATE ecs_account_balance SET available_cents = available_cents - ?1, frozen_cents = frozen_cents + ?1
-                         WHERE user_id = ?2 AND available_cents >= ?1",
-                        rusqlite::params![amount_cents, user_id],
-                    )
-                    .map_err(db_err)?;
-                if updated == 0 {
-                    return Err(AppError::Conflict("insufficient balance".to_string()));
-                }
-                tx.execute(
-                    "INSERT INTO ecs_account_log (user_id, available_delta_cents, frozen_delta_cents, reason, reference_type, reference_id, created_at)
-                     VALUES (?1, ?2, ?3, 'withdrawal_freeze', 'user_account', 0, ?4)",
-                    rusqlite::params![user_id, -amount_cents, amount_cents, now],
-                )
-                .map_err(db_err)?;
-                "pending_review"
+            "pending_payment"
+        }
+        _ => {
+            // Withdrawal: atomically freeze available balance.
+            let updated = e(
+                &tx,
+                "UPDATE ecs_account_balance SET available_cents = available_cents - ?, frozen_cents = frozen_cents + ?
+                 WHERE user_id = ? AND available_cents >= ?",
+                vec![json!(amount_cents), json!(amount_cents), json!(auth.user_id), json!(amount_cents)],
+            )
+            .await?;
+            if updated.rows_affected == 0 {
+                return Err(AppError::Conflict("insufficient balance".to_string()));
             }
-        };
-        tx.execute(
-            "INSERT INTO ecs_user_account (user_id, amount_cents, process_type, payment_id, user_note, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![user_id, amount_cents, kind, payment_id, note, status, now],
-        )
-        .map_err(db_err)?;
-        let rec_id = tx.last_insert_rowid();
-        tx.commit().map_err(db_err)?;
-        Ok(json!({
+            e(
+                &tx,
+                "INSERT INTO ecs_account_log (user_id, available_delta_cents, frozen_delta_cents, reason, reference_type, reference_id, created_at)
+                 VALUES (?, ?, ?, 'withdrawal_freeze', 'user_account', 0, ?)",
+                vec![json!(auth.user_id), json!(-amount_cents), json!(amount_cents), json!(now)],
+            )
+            .await?;
+            "pending_review"
+        }
+    };
+    let result = e(
+        &tx,
+        "INSERT INTO ecs_user_account (user_id, amount_cents, process_type, payment_id, user_note, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        vec![
+            json!(auth.user_id),
+            json!(amount_cents),
+            json!(body.kind),
+            json!(body.payment_id),
+            json!(body.note),
+            json!(status),
+            json!(now),
+        ],
+    )
+    .await?;
+    let rec_id = insert_id(&result);
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
             "id": rec_id,
-            "kind": kind,
+            "kind": body.kind,
             "amount": cents_to_string(amount_cents),
             "status": status,
-        }))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok((StatusCode::CREATED, Json(result)))
+        })),
+    ))
 }
 
 /// GET /api/v1/me/account/requests
@@ -1063,48 +945,40 @@ pub async fn account_request_list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let user_id = auth.user_id;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let balance: Option<(i64, i64)> = conn
-            .query_row(
-                "SELECT available_cents, frozen_cents FROM ecs_account_balance WHERE user_id = ?1",
-                [user_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let (available, frozen) = balance.unwrap_or((0, 0));
-        let mut stmt = conn
-            .prepare(
-                "SELECT rec_id, process_type, amount_cents, payment_id, status, created_at, paid_at
-                 FROM ecs_user_account WHERE user_id = ?1 ORDER BY rec_id DESC",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([user_id], |r| {
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "kind": r.get::<_, String>(1)?,
-                    "amount": cents_to_string(r.get::<_, i64>(2)?),
-                    "payment_id": r.get::<_, Option<i64>>(3)?,
-                    "status": r.get::<_, String>(4)?,
-                    "created_at": r.get::<_, i64>(5)?,
-                    "paid_at": r.get::<_, Option<i64>>(6)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({
-            "available_balance": cents_to_string(available),
-            "frozen_balance": cents_to_string(frozen),
-            "items": items,
-        }))
+    let rb = state.rb;
+    let balance = q1(
+        rb,
+        "SELECT available_cents AS available_cents, frozen_cents AS frozen_cents FROM ecs_account_balance WHERE user_id = ?",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .unwrap_or(json!({"available_cents": 0, "frozen_cents": 0}));
+    let items = q(
+        rb,
+        "SELECT rec_id AS rec_id, process_type AS process_type, amount_cents AS amount_cents, payment_id AS payment_id,
+                status AS status, created_at AS created_at, paid_at AS paid_at
+         FROM ecs_user_account WHERE user_id = ? ORDER BY rec_id DESC",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "rec_id"),
+            "kind": col_str(&r, "process_type"),
+            "amount": cents_to_string(col_i64(&r, "amount_cents")),
+            "payment_id": col_opt_i64(&r, "payment_id"),
+            "status": col_str(&r, "status"),
+            "created_at": col_i64(&r, "created_at"),
+            "paid_at": col_opt_i64(&r, "paid_at"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "available_balance": cents_to_string(col_i64(&balance, "available_cents")),
+        "frozen_balance": cents_to_string(col_i64(&balance, "frozen_cents")),
+        "items": items,
+    })))
 }
 
 /// DELETE /api/v1/me/account/requests/{id} — cancels unprocessed requests, unfreezes withdrawals.
@@ -1114,46 +988,42 @@ pub async fn account_request_cancel(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
     let now = unix_now();
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let row: Option<(String, i64)> = tx
-            .query_row(
-                "SELECT process_type, amount_cents FROM ecs_user_account
-                 WHERE rec_id = ?1 AND user_id = ?2 AND ((process_type = 'deposit' AND status = 'pending_payment')
-                    OR (process_type = 'withdrawal' AND status = 'pending_review'))",
-                [rec_id, user_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let Some((kind, amount)) = row else {
-            return Err(AppError::NotFound("cancellable request not found".to_string()));
-        };
-        if kind == "withdrawal" {
-            tx.execute(
-                "UPDATE ecs_account_balance SET frozen_cents = frozen_cents - ?1, available_cents = available_cents + ?1
-                 WHERE user_id = ?2",
-                rusqlite::params![amount, user_id],
-            )
-            .map_err(db_err)?;
-            tx.execute(
-                "INSERT INTO ecs_account_log (user_id, available_delta_cents, frozen_delta_cents, reason, reference_type, reference_id, created_at)
-                 VALUES (?1, ?2, ?3, 'withdrawal_cancel_unfreeze', 'user_account', ?4, ?5)",
-                rusqlite::params![user_id, amount, -amount, rec_id, now],
-            )
-            .map_err(db_err)?;
-        }
-        tx.execute("DELETE FROM ecs_user_account WHERE rec_id = ?1", [rec_id])
-            .map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let row = q1(
+        &tx,
+        "SELECT process_type AS process_type, amount_cents AS amount_cents FROM ecs_user_account
+         WHERE rec_id = ? AND user_id = ? AND ((process_type = 'deposit' AND status = 'pending_payment')
+            OR (process_type = 'withdrawal' AND status = 'pending_review'))",
+        vec![json!(rec_id), json!(auth.user_id)],
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("cancellable request not found".to_string()))?;
+    let kind = col_str(&row, "process_type");
+    let amount = col_i64(&row, "amount_cents");
+    if kind == "withdrawal" {
+        e(
+            &tx,
+            "UPDATE ecs_account_balance SET frozen_cents = frozen_cents - ?, available_cents = available_cents + ?
+             WHERE user_id = ?",
+            vec![json!(amount), json!(amount), json!(auth.user_id)],
+        )
+        .await?;
+        e(
+            &tx,
+            "INSERT INTO ecs_account_log (user_id, available_delta_cents, frozen_delta_cents, reason, reference_type, reference_id, created_at)
+             VALUES (?, ?, ?, 'withdrawal_cancel_unfreeze', 'user_account', ?, ?)",
+            vec![json!(auth.user_id), json!(amount), json!(-amount), json!(rec_id), json!(now)],
+        )
+        .await?;
+    }
+    e(
+        &tx,
+        "DELETE FROM ecs_user_account WHERE rec_id = ?",
+        vec![json!(rec_id)],
+    )
+    .await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1170,56 +1040,63 @@ pub async fn account_request_payment(
     Json(body): Json<AccountPaymentRequest>,
 ) -> Result<Json<Value>, AppError> {
     let rec_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
     let now = unix_now();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let row: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT amount_cents, status FROM ecs_user_account
-                 WHERE rec_id = ?1 AND user_id = ?2 AND process_type = 'deposit' AND status = 'pending_payment'",
-                [rec_id, user_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let Some((amount, _status)) = row else {
-            return Err(AppError::NotFound("pending deposit not found".to_string()));
-        };
-        let fee_cents: i64 = tx
-            .query_row(
-                "SELECT pay_fee FROM ecs_payment WHERE pay_id = ?1 AND enabled = 1",
-                [body.payment_id],
-                |r| r.get::<_, f64>(0).map(|f| (f * 100.0).round() as i64),
-            )
-            .optional()
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::NotFound("payment not found or disabled".to_string()))?;
-        // Idempotent: one intent per request; repeat calls update the same row.
-        tx.execute(
-            "INSERT INTO ecs_account_payment_intent (request_id, user_id, payment_id, amount_cents, fee_cents, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?6)
-             ON CONFLICT(request_id) DO UPDATE SET payment_id = ?3, fee_cents = ?5, updated_at = ?6",
-            rusqlite::params![rec_id, user_id, body.payment_id, amount, fee_cents, now],
-        )
-        .map_err(db_err)?;
-        let intent_id = tx.last_insert_rowid();
-        tx.commit().map_err(db_err)?;
-        Ok(json!({
-            "id": intent_id,
-            "request_id": rec_id,
-            "payment_id": body.payment_id,
-            "amount": cents_to_string(amount),
-            "fee": cents_to_string(fee_cents),
-            "total": cents_to_string(amount + fee_cents),
-            "status": "pending",
-        }))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    let row = q1(
+        &tx,
+        "SELECT amount_cents AS amount_cents FROM ecs_user_account
+         WHERE rec_id = ? AND user_id = ? AND process_type = 'deposit' AND status = 'pending_payment'",
+        vec![json!(rec_id), json!(auth.user_id)],
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("pending deposit not found".to_string()))?;
+    let amount = col_i64(&row, "amount_cents");
+    let fee_cents = q1(
+        &tx,
+        "SELECT pay_fee AS pay_fee FROM ecs_payment WHERE pay_id = ? AND enabled = 1",
+        vec![json!(body.payment_id)],
+    )
+    .await?
+    .map(|r| col_cents(&r, "pay_fee"))
+    .ok_or_else(|| AppError::NotFound("payment not found or disabled".to_string()))?;
+    // Idempotent: one intent per request; repeat calls update the same row.
+    e(
+        &tx,
+        "INSERT INTO ecs_account_payment_intent (request_id, user_id, payment_id, amount_cents, fee_cents, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+         ON CONFLICT(request_id) DO UPDATE SET payment_id = ?, fee_cents = ?, updated_at = ?",
+        vec![
+            json!(rec_id),
+            json!(auth.user_id),
+            json!(body.payment_id),
+            json!(amount),
+            json!(fee_cents),
+            json!(now),
+            json!(now),
+            json!(body.payment_id),
+            json!(fee_cents),
+            json!(now),
+        ],
+    )
+    .await?;
+    let intent_id = q1(
+        &tx,
+        "SELECT intent_id AS intent_id FROM ecs_account_payment_intent WHERE request_id = ?",
+        vec![json!(rec_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "intent_id"))
+    .unwrap_or(0);
+    tx.commit().await?;
+    Ok(Json(json!({
+        "id": intent_id,
+        "request_id": rec_id,
+        "payment_id": body.payment_id,
+        "amount": cents_to_string(amount),
+        "fee": cents_to_string(fee_cents),
+        "total": cents_to_string(amount + fee_cents),
+        "status": "pending",
+    })))
 }
 
 /// GET /api/v1/me/account/transactions
@@ -1227,50 +1104,42 @@ pub async fn account_transactions(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let user_id = auth.user_id;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let balance: Option<(i64, i64)> = conn
-            .query_row(
-                "SELECT available_cents, frozen_cents FROM ecs_account_balance WHERE user_id = ?1",
-                [user_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let (available, frozen) = balance.unwrap_or((0, 0));
-        let mut stmt = conn
-            .prepare(
-                "SELECT log_id, available_delta_cents, frozen_delta_cents, reason, reference_type, reference_id, created_at
-                 FROM ecs_account_log WHERE user_id = ?1 ORDER BY log_id DESC",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([user_id], |r| {
-                let available_delta: i64 = r.get(1)?;
-                let frozen_delta: i64 = r.get(2)?;
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "available_delta": format_signed_cents(available_delta),
-                    "frozen_delta": format_signed_cents(frozen_delta),
-                    "reason": r.get::<_, String>(3)?,
-                    "reference_type": r.get::<_, String>(4)?,
-                    "reference_id": r.get::<_, i64>(5)?,
-                    "created_at": r.get::<_, i64>(6)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({
-            "available_balance": cents_to_string(available),
-            "frozen_balance": cents_to_string(frozen),
-            "items": items,
-        }))
+    let rb = state.rb;
+    let balance = q1(
+        rb,
+        "SELECT available_cents AS available_cents, frozen_cents AS frozen_cents FROM ecs_account_balance WHERE user_id = ?",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .unwrap_or(json!({"available_cents": 0, "frozen_cents": 0}));
+    let items = q(
+        rb,
+        "SELECT log_id AS log_id, available_delta_cents AS available_delta_cents, frozen_delta_cents AS frozen_delta_cents,
+                reason AS reason, reference_type AS reference_type, reference_id AS reference_id, created_at AS created_at
+         FROM ecs_account_log WHERE user_id = ? ORDER BY log_id DESC",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        let available_delta = col_i64(&r, "available_delta_cents");
+        let frozen_delta = col_i64(&r, "frozen_delta_cents");
+        json!({
+            "id": col_i64(&r, "log_id"),
+            "available_delta": format_signed_cents(available_delta),
+            "frozen_delta": format_signed_cents(frozen_delta),
+            "reason": col_str(&r, "reason"),
+            "reference_type": col_str(&r, "reference_type"),
+            "reference_id": col_i64(&r, "reference_id"),
+            "created_at": col_i64(&r, "created_at"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "available_balance": cents_to_string(col_i64(&balance, "available_cents")),
+        "frozen_balance": cents_to_string(col_i64(&balance, "frozen_cents")),
+        "items": items,
+    })))
 }
 
 fn format_signed_cents(cents: i64) -> String {

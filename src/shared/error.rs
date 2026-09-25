@@ -58,4 +58,16 @@ impl IntoResponse for AppError {
     }
 }
 
+impl From<rbatis::Error> for AppError {
+    fn from(e: rbatis::Error) -> Self {
+        AppError::Internal(anyhow::anyhow!(e.to_string()))
+    }
+}
+
+impl From<std::io::Error> for AppError {
+    fn from(e: std::io::Error) -> Self {
+        AppError::Internal(anyhow::anyhow!(e))
+    }
+}
+
 pub type AppResult<T> = Result<T, AppError>;

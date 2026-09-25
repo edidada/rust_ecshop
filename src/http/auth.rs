@@ -1,31 +1,50 @@
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
-use rusqlite::OptionalExtension;
+use rbatis::executor::Executor;
+use rbatis::rbatis::RBatis;
+use serde_json::json;
 
-use crate::http::state::AppState;
 use crate::shared::error::AppError;
+use crate::shared::rbutil::{q1};
 
-/// Authenticated user resolved from the Bearer token session.
-#[derive(Debug, Clone)]
-pub struct AuthUser {
-    pub user_id: i64,
-    pub user_name: String,
+/// Look up a session token hash. Split out so it is unit-testable.
+pub async fn find_session_user(rb: &RBatis, token_hash: &str) -> Result<Option<(i64, String)>, AppError> {
+    let row = q1(
+        rb,
+        "SELECT u.user_id AS user_id, u.user_name AS user_name FROM ecs_sessions s JOIN ecs_users u ON u.user_id = s.user_id WHERE s.token_hash = ?",
+        vec![json!(token_hash)],
+    )
+    .await?;
+    Ok(row.map(|row| {
+        (
+            crate::shared::rbutil::col_i64(&row, "user_id"),
+            crate::shared::rbutil::col_str(&row, "user_name"),
+        )
+    }))
 }
 
-pub async fn authenticate(state: &AppState, headers: &axum::http::HeaderMap) -> Result<AuthUser, AppError> {
-    let token = extract_bearer_token(headers).ok_or(AppError::Unauthenticated)?;
-    let token_hash = crate::infrastructure::crypto::sha256_hex(token.as_bytes());
-    let db = state.db.clone();
-    let row = tokio::task::spawn_blocking(move || find_session_user(&db, &token_hash))
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?
-        .map_err(|e| AppError::Internal(e.into()))?;
-    row.map(|(user_id, user_name)| AuthUser { user_id, user_name })
-        .ok_or(AppError::Unauthenticated)
+/// Insert a session row for a user inside an existing transaction executor.
+pub async fn insert_session_tx<E: Executor>(tx: &E, token_hash: &str, user_id: i64) -> Result<(), AppError> {
+    crate::shared::rbutil::e(
+        tx,
+        "INSERT INTO ecs_sessions (token_hash, user_id) VALUES (?, ?)",
+        vec![json!(token_hash), json!(user_id)],
+    )
+    .await?;
+    Ok(())
 }
 
-/// Extract the raw Bearer token from the Authorization header.
-fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+/// Revoke all sessions of a user (used by password change/reset).
+pub async fn revoke_user_sessions<E: Executor>(tx: &E, user_id: i64) -> Result<(), AppError> {
+    crate::shared::rbutil::e(
+        tx,
+        "DELETE FROM ecs_sessions WHERE user_id = ?",
+        vec![json!(user_id)],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Parse the Bearer token from the Authorization header.
+pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
     let token = value.strip_prefix("Bearer ")?.trim();
     if token.is_empty() {
@@ -35,80 +54,103 @@ fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     }
 }
 
-/// Look up a session token hash. Split out of `authenticate` so it is unit-testable.
-pub fn find_session_user(
-    db: &crate::infrastructure::sqlite::SharedDb,
-    token_hash: &str,
-) -> Result<Option<(i64, String)>, rusqlite::Error> {
-    let conn = db.blocking_lock();
-    conn.query_row(
-        "SELECT u.user_id, u.user_name FROM ecs_sessions s JOIN ecs_users u ON u.user_id = s.user_id WHERE s.token_hash = ?1",
-        [token_hash],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-    )
-    .optional()
+/// Authenticated user resolved from the Bearer token session.
+#[derive(Debug, Clone)]
+pub struct AuthUser {
+    pub user_id: i64,
+    pub user_name: String,
+}
+
+pub async fn authenticate(rb: &RBatis, headers: &axum::http::HeaderMap) -> Result<AuthUser, AppError> {
+    let token = extract_bearer_token(headers).ok_or(AppError::Unauthenticated)?;
+    let token_hash = crate::infrastructure::crypto::sha256_hex(token.as_bytes());
+    find_session_user(rb, &token_hash)
+        .await?
+        .map(|(user_id, user_name)| AuthUser { user_id, user_name })
+        .ok_or(AppError::Unauthenticated)
 }
 
 #[axum::async_trait]
-impl<S: Send + Sync> FromRequestParts<S> for AuthUser
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let state = parts
-            .extensions
-            .get::<AppState>()
-            .cloned()
-            .ok_or(AppError::Unauthenticated)?;
-        authenticate(&state, &parts.headers).await
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        authenticate(state.rb, &parts.headers).await
     }
 }
+
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
+
+use crate::http::state::AppState;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
+    use crate::infrastructure::db;
 
-    fn test_db() -> crate::infrastructure::sqlite::SharedDb {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        let schema = include_str!("../../docs/sql/sqlite/001_ecshop_catalog.sql");
-        conn.execute_batch(schema).unwrap();
-        Arc::new(Mutex::new(conn))
+    /// Serialize DB-touching tests: they share one SQLite file per process and
+    /// concurrent writers would otherwise hit SQLITE_BUSY.
+    static DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn test_rb() -> &'static RBatis {
+        // Uses the global static; schema bootstrap runs once per process.
+        // Note: ":memory:" would give each pooled connection its own empty DB,
+        // so tests use a per-process scratch file database instead.
+        let url = format!("sqlite://target/rbatis-test-{}.sqlite3", std::process::id());
+        db::init(&url).await.expect("init test sqlite")
     }
 
-    fn seed_session(db: &crate::infrastructure::sqlite::SharedDb, token_hash: &str) {
-        let conn = db.blocking_lock();
-        conn.execute(
-            "INSERT INTO ecs_users (user_id, user_name, email, password_hash) VALUES (1, 'alice', 'alice@example.test', 'x')",
-            [],
+    #[tokio::test]
+    async fn find_session_user_misses_unknown_token() {
+        let rb = test_rb().await;
+        let hash = crate::infrastructure::crypto::sha256_hex(b"no-such-token");
+        let found = find_session_user(rb, &hash).await.unwrap();
+        assert_eq!(found, None);
+    }
+
+    #[tokio::test]
+    async fn find_session_user_returns_seeded_session() {
+        let _guard = DB_TEST_LOCK.lock().await;
+        let rb = test_rb().await;
+        let token = format!("token-{}", std::process::id());
+        let hash = crate::infrastructure::crypto::sha256_hex(token.as_bytes());
+        crate::shared::rbutil::e(
+            rb,
+            "INSERT OR IGNORE INTO ecs_users (user_id, user_name, email, password_hash) VALUES (991, 'rbatis-test-user', 'rbatis-test@example.test', 'x')",
+            vec![],
         )
+        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO ecs_sessions (token_hash, user_id) VALUES (?1, 1)",
-            [token_hash],
+        crate::shared::rbutil::e(
+            rb,
+            "INSERT OR REPLACE INTO ecs_sessions (token_hash, user_id) VALUES (?, 991)",
+            vec![json!(hash)],
         )
+        .await
         .unwrap();
+        let found = find_session_user(rb, &hash).await.unwrap();
+        assert_eq!(found, Some((991, "rbatis-test-user".to_string())));
     }
 
-    #[test]
-    fn find_session_user_returns_seeded_session() {
-        let db = test_db();
-        let hash = crate::infrastructure::crypto::sha256_hex(b"token-a");
-        seed_session(&db, &hash);
-        let found = find_session_user(&db, &hash).unwrap();
-        assert_eq!(found, Some((1, "alice".to_string())));
-    }
-
-    #[test]
-    fn find_session_user_misses_unknown_token() {
-        let db = test_db();
-        let hash = crate::infrastructure::crypto::sha256_hex(b"token-a");
-        seed_session(&db, &hash);
-        let other = crate::infrastructure::crypto::sha256_hex(b"token-b");
-        let found = find_session_user(&db, &other).unwrap();
+    #[tokio::test]
+    async fn transaction_rolls_back_on_explicit_rollback() {
+        let _guard = DB_TEST_LOCK.lock().await;
+        let rb = test_rb().await;
+        crate::shared::rbutil::e(
+            rb,
+            "INSERT OR IGNORE INTO ecs_users (user_id, user_name, email, password_hash) VALUES (992, 'rbatis-tx-user', 'rbatis-tx@example.test', 'x')",
+            vec![],
+        )
+        .await
+        .unwrap();
+        {
+            let tx = db::begin(rb).await.unwrap();
+            insert_session_tx(&tx, "rollback-check-hash", 992).await.unwrap();
+            // Explicit rollback: uncommitted changes must stay invisible.
+            tx.rollback().await.unwrap();
+        }
+        let found = find_session_user(rb, "rollback-check-hash").await.unwrap();
         assert_eq!(found, None);
     }
 

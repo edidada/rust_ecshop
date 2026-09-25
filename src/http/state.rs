@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
+use rbatis::rbatis::RBatis;
 use serde::Deserialize;
-
-use crate::infrastructure::sqlite::SharedDb;
 
 /// Immutable application configuration, built once at startup.
 #[derive(Debug, Clone)]
@@ -19,7 +18,7 @@ impl Default for AppConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 28080,
-            database_url: "data/ecshop.sqlite3".to_string(),
+            database_url: "sqlite://data/ecshop.sqlite3".to_string(),
             payment_callback_secret: "dev-payment-callback-secret".to_string(),
             site_base_url: "http://127.0.0.1:28080".to_string(),
         }
@@ -71,6 +70,13 @@ struct RawConfig {
     port: u16,
 }
 
+/// Shared application state injected into handlers.
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<AppConfig>,
+    pub rb: &'static RBatis,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,11 +95,4 @@ mod tests {
         assert!(fixed.validate().is_ok());
         std::env::remove_var("ECSHOP_ENV");
     }
-}
-
-/// Shared application state injected into handlers.
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Arc<AppConfig>,
-    pub db: SharedDb,
 }

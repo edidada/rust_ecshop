@@ -1,7 +1,7 @@
 //! Dependency assembly and startup.
 
 use crate::http::state::{AppState, AppConfig};
-use crate::infrastructure::sqlite;
+use crate::infrastructure::db;
 use crate::shared::error::AppError;
 
 pub async fn run() -> Result<(), AppError> {
@@ -9,10 +9,12 @@ pub async fn run() -> Result<(), AppError> {
     config
         .validate()
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-    let db = sqlite::open_sqlite(&config.database_url).map_err(AppError::Internal)?;
+    let rb = db::init(&config.database_url)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     let state = AppState {
         config: std::sync::Arc::new(config),
-        db,
+        rb,
     };
     crate::http::run(state).await
 }

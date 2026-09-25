@@ -1,14 +1,13 @@
 //! Goods HTTP layer: routes, handlers and DTO mapping for catalog/goods URLs.
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
+use crate::shared::rbutil::{col_i64, col_str, col_opt_str, col_cents, col_f64, q, q1, e};
 use crate::shared::util::{cents_to_string, PageParams};
 
 #[derive(Deserialize)]
@@ -24,121 +23,118 @@ pub struct GoodsListQuery {
     goods_ids: Option<String>,
 }
 
-fn db_err(e: rusqlite::Error) -> AppError {
-    AppError::Internal(e.into())
+const GOODS_LIST_COLS: &str = "goods_id AS goods_id, goods_name AS goods_name, shop_price AS shop_price, market_price AS market_price, goods_brief AS goods_brief, goods_thumb AS goods_thumb";
+
+fn goods_item(row: &Value) -> Value {
+    json!({
+        "id": col_i64(row, "goods_id"),
+        "name": col_str(row, "goods_name"),
+        "price": cents_to_string(col_cents(row, "shop_price")),
+        "market_price": cents_to_string(col_cents(row, "market_price")),
+        "brief": col_str(row, "goods_brief"),
+        "thumb": col_str(row, "goods_thumb"),
+    })
 }
 
 /// GET /api/v1/home
 pub async fn home(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let categories: Vec<Value> = {
-            let mut stmt = conn
-                .prepare("SELECT cat_id, cat_name FROM ecs_category WHERE is_show = 1 ORDER BY sort_order, cat_id")
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([], |r| Ok(json!({"id": r.get::<_,i64>(0)?, "name": r.get::<_,String>(1)?})))
-                .map_err(db_err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
-        };
-        let newest: Vec<Value> = goods_rows(&conn, "WHERE is_on_sale = 1 AND is_delete = 0 ORDER BY goods_id DESC LIMIT 10", [])?;
-        let best: Vec<Value> = goods_rows(&conn, "WHERE is_on_sale = 1 AND is_delete = 0 AND is_best = 1 ORDER BY goods_id DESC LIMIT 10", [])?;
-        let hot: Vec<Value> = goods_rows(&conn, "WHERE is_on_sale = 1 AND is_delete = 0 AND is_hot = 1 ORDER BY goods_id DESC LIMIT 10", [])?;
-        let articles: Vec<Value> = {
-            let mut stmt = conn
-                .prepare("SELECT article_id, title FROM ecs_article WHERE is_open = 1 ORDER BY article_id DESC LIMIT 10")
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([], |r| Ok(json!({"id": r.get::<_,i64>(0)?, "title": r.get::<_,String>(1)?})))
-                .map_err(db_err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
-        };
-        Ok(json!({"categories": categories, "new_goods": newest, "best_goods": best, "hot_goods": hot, "articles": articles}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
-}
-
-fn goods_rows(
-    conn: &rusqlite::Connection,
-    suffix: &str,
-    params: impl rusqlite::Params,
-) -> Result<Vec<Value>, AppError> {
-    let sql = format!(
-        "SELECT goods_id, goods_name, shop_price, market_price, goods_brief, goods_thumb FROM ecs_goods {suffix}"
-    );
-    let mut stmt = conn.prepare(&sql).map_err(db_err)?;
-    let rows = stmt
-        .query_map(params, |r| {
-            let price: f64 = r.get(2)?;
-            let mp: f64 = r.get(3)?;
-            Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "name": r.get::<_, String>(1)?,
-                "price": cents_to_string((price * 100.0).round() as i64),
-                "market_price": cents_to_string((mp * 100.0).round() as i64),
-                "brief": r.get::<_, String>(4)?,
-                "thumb": r.get::<_, String>(5)?,
-            }))
-        })
-        .map_err(db_err)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    let rb = state.rb;
+    let categories = q(
+        rb,
+        "SELECT cat_id AS cat_id, cat_name AS cat_name FROM ecs_category WHERE is_show = 1 ORDER BY sort_order, cat_id",
+        vec![],
+    )
+    .await?
+    .into_iter()
+    .map(|r| json!({"id": col_i64(&r, "cat_id"), "name": col_str(&r, "cat_name")}))
+    .collect::<Vec<_>>();
+    let newest = q(
+        rb,
+        &format!("SELECT {GOODS_LIST_COLS} FROM ecs_goods WHERE is_on_sale = 1 AND is_delete = 0 ORDER BY goods_id DESC LIMIT 10"),
+        vec![],
+    )
+    .await?;
+    let best = q(
+        rb,
+        &format!("SELECT {GOODS_LIST_COLS} FROM ecs_goods WHERE is_on_sale = 1 AND is_delete = 0 AND is_best = 1 ORDER BY goods_id DESC LIMIT 10"),
+        vec![],
+    )
+    .await?;
+    let hot = q(
+        rb,
+        &format!("SELECT {GOODS_LIST_COLS} FROM ecs_goods WHERE is_on_sale = 1 AND is_delete = 0 AND is_hot = 1 ORDER BY goods_id DESC LIMIT 10"),
+        vec![],
+    )
+    .await?;
+    let articles = q(
+        rb,
+        "SELECT article_id AS article_id, title AS title FROM ecs_article WHERE is_open = 1 ORDER BY article_id DESC LIMIT 10",
+        vec![],
+    )
+    .await?
+    .into_iter()
+    .map(|r| json!({"id": col_i64(&r, "article_id"), "title": col_str(&r, "title")}))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "categories": categories,
+        "new_goods": newest.iter().map(goods_item).collect::<Vec<_>>(),
+        "best_goods": best.iter().map(goods_item).collect::<Vec<_>>(),
+        "hot_goods": hot.iter().map(goods_item).collect::<Vec<_>>(),
+        "articles": articles,
+    })))
 }
 
 /// GET /api/v1/catalog
 pub async fn catalog(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let categories: Vec<Value> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT c.cat_id, c.cat_name, c.parent_id, c.sort_order,
-                        (SELECT COUNT(*) FROM ecs_goods g WHERE g.cat_id = c.cat_id AND g.is_on_sale = 1 AND g.is_delete = 0 AND g.is_alone_sale = 1) AS goods_count
-                     FROM ecs_category c WHERE c.is_show = 1 ORDER BY c.parent_id, c.sort_order, c.cat_id",
-                )
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok(json!({
-                        "id": r.get::<_, i64>(0)?,
-                        "name": r.get::<_, String>(1)?,
-                        "parent_id": r.get::<_, i64>(2)?,
-                        "sort_order": r.get::<_, i64>(3)?,
-                        "goods_count": r.get::<_, i64>(4)?,
-                    }))
-                })
-                .map_err(db_err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
-        };
-        let brands: Vec<Value> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT b.brand_id, b.brand_name, b.brand_logo, b.site_url,
-                        (SELECT COUNT(*) FROM ecs_goods g WHERE g.brand_id = b.brand_id AND g.is_on_sale = 1 AND g.is_delete = 0) AS goods_count
-                     FROM ecs_brand b WHERE b.is_show = 1 ORDER BY b.sort_order, b.brand_id",
-                )
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok(json!({
-                        "id": r.get::<_, i64>(0)?,
-                        "name": r.get::<_, String>(1)?,
-                        "logo": r.get::<_, String>(2)?,
-                        "site_url": r.get::<_, String>(3)?,
-                        "goods_count": r.get::<_, i64>(4)?,
-                    }))
-                })
-                .map_err(db_err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
-        };
-        Ok(json!({"categories": categories, "brands": brands}))
+    let rb = state.rb;
+    let categories = q(
+        rb,
+        "SELECT c.cat_id AS cat_id, c.cat_name AS cat_name, c.parent_id AS parent_id, c.sort_order AS sort_order,
+            (SELECT COUNT(*) FROM ecs_goods g WHERE g.cat_id = c.cat_id AND g.is_on_sale = 1 AND g.is_delete = 0 AND g.is_alone_sale = 1) AS goods_count
+         FROM ecs_category c WHERE c.is_show = 1 ORDER BY c.parent_id, c.sort_order, c.cat_id",
+        vec![],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "cat_id"),
+            "name": col_str(&r, "cat_name"),
+            "parent_id": col_i64(&r, "parent_id"),
+            "sort_order": col_i64(&r, "sort_order"),
+            "goods_count": col_i64(&r, "goods_count"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    let brands = q(
+        rb,
+        "SELECT b.brand_id AS brand_id, b.brand_name AS brand_name, b.brand_logo AS brand_logo, b.site_url AS site_url,
+            (SELECT COUNT(*) FROM ecs_goods g WHERE g.brand_id = b.brand_id AND g.is_on_sale = 1 AND g.is_delete = 0) AS goods_count
+         FROM ecs_brand b WHERE b.is_show = 1 ORDER BY b.sort_order, b.brand_id",
+        vec![],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "brand_id"),
+            "name": col_str(&r, "brand_name"),
+            "logo": col_str(&r, "brand_logo"),
+            "site_url": col_str(&r, "site_url"),
+            "goods_count": col_i64(&r, "goods_count"),
+        })
+    })
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"categories": categories, "brands": brands})))
+}
+
+fn parse_id(id: &str) -> Result<i64, AppError> {
+    match id.parse::<i64>() {
+        Ok(v) if v > 0 => Ok(v),
+        _ => Err(AppError::Validation(
+            "id must be a positive integer".to_string(),
+        )),
+    }
 }
 
 /// GET /api/v1/goods/{id}
@@ -147,164 +143,123 @@ pub async fn goods_detail(
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
     let goods_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let goods = conn
-            .query_row(
-                "SELECT goods_id, goods_name, goods_sn, brand_id, goods_number, market_price, shop_price, goods_brief, goods_desc, goods_img, goods_thumb, is_on_sale, is_delete
-                 FROM ecs_goods WHERE goods_id = ?1",
-                [goods_id],
-                |r| {
-                    let is_on_sale: i64 = r.get(11)?;
-                    let is_delete: i64 = r.get(12)?;
-                    if is_on_sale != 1 || is_delete != 0 {
-                        return Ok(None);
-                    }
-                    let shop_price: f64 = r.get(6)?;
-                    let market_price: f64 = r.get(5)?;
-                    Ok(Some(json!({
-                        "id": r.get::<_, i64>(0)?,
-                        "name": r.get::<_, String>(1)?,
-                        "sn": r.get::<_, String>(2)?,
-                        "brand_id": r.get::<_, i64>(3)?,
-                        "stock": r.get::<_, i64>(4)?,
-                        "market_price": cents_to_string((market_price * 100.0).round() as i64),
-                        "price": cents_to_string((shop_price * 100.0).round() as i64),
-                        "brief": r.get::<_, String>(7)?,
-                        "desc": r.get::<_, String>(8)?,
-                        "img": r.get::<_, String>(9)?,
-                        "thumb": r.get::<_, String>(10)?,
-                    })))
-                },
-            )
-            .optional()
-            .map_err(db_err)?;
-        let mut goods = match goods {
-            Some(Some(g)) => g,
-            _ => return Err(AppError::NotFound("goods not found".to_string())),
-        };
-        let gallery: Vec<Value> = {
-            let mut stmt = conn
-                .prepare("SELECT img_id, img_url, img_desc, thumb_url, img_original FROM ecs_goods_gallery WHERE goods_id = ?1 ORDER BY img_id")
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([goods_id], |r| {
-                    Ok(json!({
-                        "id": r.get::<_, i64>(0)?,
-                        "url": r.get::<_, String>(1)?,
-                        "desc": r.get::<_, String>(2)?,
-                        "thumb": r.get::<_, String>(3)?,
-                        "original": r.get::<_, String>(4)?,
-                    }))
-                })
-                .map_err(db_err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
-        };
-        let attrs: Vec<Value> = {
-            let mut stmt = conn
-                .prepare("SELECT goods_attr_id, attr_id, attr_value, attr_price FROM ecs_goods_attr WHERE goods_id = ?1")
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([goods_id], |r| {
-                    Ok(json!({
-                        "id": r.get::<_, i64>(0)?,
-                        "attr_id": r.get::<_, i64>(1)?,
-                        "value": r.get::<_, String>(2)?,
-                        "price": r.get::<_, String>(3)?,
-                    }))
-                })
-                .map_err(db_err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
-        };
-        goods["gallery"] = Value::Array(gallery);
-        goods["attributes"] = Value::Array(attrs);
-        Ok(goods)
+    let rb = state.rb;
+    let row = q1(
+        rb,
+        "SELECT goods_id AS goods_id, goods_name AS goods_name, goods_sn AS goods_sn, brand_id AS brand_id, goods_number AS goods_number,
+                market_price AS market_price, shop_price AS shop_price, goods_brief AS goods_brief, goods_desc AS goods_desc,
+                goods_img AS goods_img, goods_thumb AS goods_thumb, is_on_sale AS is_on_sale, is_delete AS is_delete
+         FROM ecs_goods WHERE goods_id = ?",
+        vec![json!(goods_id)],
+    )
+    .await?
+    .filter(|r| col_i64(r, "is_on_sale") == 1 && col_i64(r, "is_delete") == 0)
+    .ok_or_else(|| AppError::NotFound("goods not found".to_string()))?;
+    let gallery = q(
+        rb,
+        "SELECT img_id AS img_id, img_url AS img_url, img_desc AS img_desc, thumb_url AS thumb_url, img_original AS img_original
+         FROM ecs_goods_gallery WHERE goods_id = ? ORDER BY img_id",
+        vec![json!(goods_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "img_id"),
+            "url": col_str(&r, "img_url"),
+            "desc": col_str(&r, "img_desc"),
+            "thumb": col_str(&r, "thumb_url"),
+            "original": col_str(&r, "img_original"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result).into_response())
-}
-
-fn parse_id(id: &str) -> Result<i64, AppError> {
-    match id.parse::<i64>() {
-        Ok(v) if v > 0 => Ok(v),
-        _ => Err(AppError::Validation(
-            "goods id must be a positive integer".to_string(),
-        )),
-    }
+    .collect::<Vec<_>>();
+    let attrs = q(
+        rb,
+        "SELECT goods_attr_id AS goods_attr_id, attr_id AS attr_id, attr_value AS attr_value, attr_price AS attr_price
+         FROM ecs_goods_attr WHERE goods_id = ?",
+        vec![json!(goods_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "goods_attr_id"),
+            "attr_id": col_i64(&r, "attr_id"),
+            "value": col_str(&r, "attr_value"),
+            "price": col_str(&r, "attr_price"),
+        })
+    })
+    .collect::<Vec<_>>();
+    let goods = json!({
+        "id": col_i64(&row, "goods_id"),
+        "name": col_str(&row, "goods_name"),
+        "sn": col_str(&row, "goods_sn"),
+        "brand_id": col_i64(&row, "brand_id"),
+        "stock": col_i64(&row, "goods_number"),
+        "market_price": cents_to_string(col_cents(&row, "market_price")),
+        "price": cents_to_string(col_cents(&row, "shop_price")),
+        "brief": col_str(&row, "goods_brief"),
+        "desc": col_str(&row, "goods_desc"),
+        "img": col_str(&row, "goods_img"),
+        "thumb": col_str(&row, "goods_thumb"),
+        "gallery": gallery,
+        "attributes": attrs,
+    });
+    Ok(Json(goods).into_response())
 }
 
 /// GET /api/v1/goods (search + list)
 pub async fn goods_list(
     State(state): State<AppState>,
-    Query(q): Query<GoodsListQuery>,
+    Query(qp): Query<GoodsListQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let page = PageParams { page: q.page, page_size: q.page_size };
+    let page = PageParams { page: qp.page, page_size: qp.page_size };
     let (page_no, page_size, offset) = page.resolve();
-    let db = state.db.clone();
-    let category_id = q.category_id;
-    let brand_id = q.brand_id;
-    let keyword = q.q.clone().or_else(|| q.keywords.clone()).unwrap_or_default();
-    let sort = q.sort.clone().unwrap_or_default();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let mut where_clause = "WHERE is_on_sale = 1 AND is_delete = 0".to_string();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(cid) = category_id {
-            where_clause.push_str(" AND cat_id = ?");
-            params.push(Box::new(cid));
-        }
-        if let Some(bid) = brand_id {
-            where_clause.push_str(" AND brand_id = ?");
-            params.push(Box::new(bid));
-        }
-        if !keyword.is_empty() {
-            where_clause.push_str(" AND (goods_name LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')");
-            let escaped = format!("%{}%", escape_like(&keyword));
-            params.push(Box::new(escaped.clone()));
-            params.push(Box::new(escaped));
-        }
-        let order_by = match sort.as_str() {
-            "price_asc" => "ORDER BY shop_price ASC",
-            "price_desc" => "ORDER BY shop_price DESC",
-            "newest" => "ORDER BY goods_id DESC",
-            "sales" => "ORDER BY click_count DESC",
-            _ => "ORDER BY sort_order, goods_id DESC",
-        };
-        let total: i64 = {
-            let sql = format!("SELECT COUNT(*) FROM ecs_goods {where_clause}");
-            let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            conn.query_row(&sql, params_ref.as_slice(), |r| r.get(0))
-                .map_err(db_err)?
-        };
-        let sql = format!(
-            "SELECT goods_id, goods_name, shop_price, market_price, goods_brief, goods_thumb FROM ecs_goods {where_clause} {order_by} LIMIT ? OFFSET ?"
-        );
-        params.push(Box::new(page_size));
-        params.push(Box::new(offset));
-        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
-        let rows = stmt
-            .query_map(params_ref.as_slice(), |r| {
-                let price: f64 = r.get(2)?;
-                let mp: f64 = r.get(3)?;
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "name": r.get::<_, String>(1)?,
-                    "price": cents_to_string((price * 100.0).round() as i64),
-                    "market_price": cents_to_string((mp * 100.0).round() as i64),
-                    "brief": r.get::<_, String>(4)?,
-                    "thumb": r.get::<_, String>(5)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({"page": page_no, "page_size": page_size, "total": total, "items": items}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    let rb = state.rb;
+    let mut where_clause = "WHERE is_on_sale = 1 AND is_delete = 0".to_string();
+    let mut args: Vec<Value> = Vec::new();
+    if let Some(cid) = qp.category_id {
+        where_clause.push_str(" AND cat_id = ?");
+        args.push(json!(cid));
+    }
+    if let Some(bid) = qp.brand_id {
+        where_clause.push_str(" AND brand_id = ?");
+        args.push(json!(bid));
+    }
+    let keyword = qp.q.clone().or_else(|| qp.keywords.clone()).unwrap_or_default();
+    if !keyword.is_empty() {
+        where_clause.push_str(" AND (goods_name LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')");
+        let escaped = format!("%{}%", escape_like(&keyword));
+        args.push(json!(escaped.clone()));
+        args.push(json!(escaped));
+    }
+    let order_by = match qp.sort.as_deref() {
+        Some("price_asc") => "ORDER BY shop_price ASC",
+        Some("price_desc") => "ORDER BY shop_price DESC",
+        Some("newest") => "ORDER BY goods_id DESC",
+        Some("sales") => "ORDER BY click_count DESC",
+        _ => "ORDER BY sort_order, goods_id DESC",
+    };
+    let total_row = q1(
+        rb,
+        &format!("SELECT COUNT(*) AS cnt FROM ecs_goods {where_clause}"),
+        args.clone(),
+    )
+    .await?
+    .unwrap_or_default();
+    let total = col_i64(&total_row, "cnt");
+    args.push(json!(page_size));
+    args.push(json!(offset));
+    let items = q(
+        rb,
+        &format!("SELECT {GOODS_LIST_COLS} FROM ecs_goods {where_clause} {order_by} LIMIT ? OFFSET ?"),
+        args,
+    )
+    .await?
+    .iter()
+    .map(goods_item)
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
 }
 
 fn escape_like(input: &str) -> String {
@@ -320,189 +275,142 @@ fn escape_like(input: &str) -> String {
         .collect()
 }
 
-/// GET /api/v1/brands, GET /api/v1/brands/{id}/goods
+/// GET /api/v1/brands
 pub async fn brands(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let mut stmt = conn
-            .prepare("SELECT brand_id, brand_name, brand_logo, site_url FROM ecs_brand WHERE is_show = 1 ORDER BY sort_order, brand_id")
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "name": r.get::<_, String>(1)?,
-                    "logo": r.get::<_, String>(2)?,
-                    "site_url": r.get::<_, String>(3)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({"items": items}))
+    let items = q(
+        state.rb,
+        "SELECT brand_id AS brand_id, brand_name AS brand_name, brand_logo AS brand_logo, site_url AS site_url
+         FROM ecs_brand WHERE is_show = 1 ORDER BY sort_order, brand_id",
+        vec![],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "brand_id"),
+            "name": col_str(&r, "brand_name"),
+            "logo": col_str(&r, "brand_logo"),
+            "site_url": col_str(&r, "site_url"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"items": items})))
 }
 
+/// GET /api/v1/brands/{id}/goods
 pub async fn brand_goods(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Query(q): Query<GoodsListQuery>,
+    Query(qp): Query<GoodsListQuery>,
 ) -> Result<Json<Value>, AppError> {
     let brand_id = parse_id(&id)?;
-    let page = PageParams { page: q.page, page_size: q.page_size };
+    let page = PageParams { page: qp.page, page_size: qp.page_size };
     let (page_no, page_size, offset) = page.resolve();
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let total: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM ecs_goods WHERE brand_id = ?1 AND is_on_sale = 1 AND is_delete = 0",
-                [brand_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        let items = goods_rows_paged(&conn, brand_id, page_size, offset)?;
-        Ok(json!({"page": page_no, "page_size": page_size, "total": total, "items": items}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
-}
-
-fn goods_rows_paged(
-    conn: &rusqlite::Connection,
-    brand_id: i64,
-    page_size: i64,
-    offset: i64,
-) -> Result<Vec<Value>, AppError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT goods_id, goods_name, shop_price, market_price, goods_brief, goods_thumb
-             FROM ecs_goods WHERE brand_id = ?1 AND is_on_sale = 1 AND is_delete = 0
-             ORDER BY sort_order, goods_id DESC LIMIT ?2 OFFSET ?3",
-        )
-        .map_err(db_err)?;
-    let rows = stmt
-        .query_map([brand_id, page_size, offset], |r| {
-            let price: f64 = r.get(2)?;
-            let mp: f64 = r.get(3)?;
-            Ok(json!({
-                "id": r.get::<_, i64>(0)?,
-                "name": r.get::<_, String>(1)?,
-                "price": cents_to_string((price * 100.0).round() as i64),
-                "market_price": cents_to_string((mp * 100.0).round() as i64),
-                "brief": r.get::<_, String>(4)?,
-                "thumb": r.get::<_, String>(5)?,
-            }))
-        })
-        .map_err(db_err)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    let rb = state.rb;
+    let total_row = q1(
+        rb,
+        "SELECT COUNT(*) AS cnt FROM ecs_goods WHERE brand_id = ? AND is_on_sale = 1 AND is_delete = 0",
+        vec![json!(brand_id)],
+    )
+    .await?
+    .unwrap_or_default();
+    let total = col_i64(&total_row, "cnt");
+    let items = q(
+        rb,
+        &format!(
+            "SELECT {GOODS_LIST_COLS} FROM ecs_goods WHERE brand_id = ? AND is_on_sale = 1 AND is_delete = 0
+             ORDER BY sort_order, goods_id DESC LIMIT ? OFFSET ?"
+        ),
+        vec![json!(brand_id), json!(page_size), json!(offset)],
+    )
+    .await?
+    .iter()
+    .map(goods_item)
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
 }
 
 /// GET /api/v1/categories/{id}/goods
 pub async fn category_goods(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Query(q): Query<GoodsListQuery>,
+    Query(qp): Query<GoodsListQuery>,
 ) -> Result<Json<Value>, AppError> {
     let category_id = parse_id(&id)?;
-    let page = PageParams { page: q.page, page_size: q.page_size };
+    let page = PageParams { page: qp.page, page_size: qp.page_size };
     let (page_no, page_size, offset) = page.resolve();
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        // Category must exist and be visible; otherwise 404 to avoid leaking.
-        let exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM ecs_category WHERE cat_id = ?1 AND is_show = 1",
-                [category_id],
-                |r| r.get(0),
+    let rb = state.rb;
+    let exists = q1(
+        rb,
+        "SELECT COUNT(*) AS cnt FROM ecs_category WHERE cat_id = ? AND is_show = 1",
+        vec![json!(category_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "cnt"))
+    .unwrap_or(0);
+    if exists == 0 {
+        return Err(AppError::NotFound("category not found".to_string()));
+    }
+    // Collect descendant category ids (the schema has no closure table; walk the chain).
+    let mut cat_ids = vec![category_id];
+    let mut frontier = vec![category_id];
+    loop {
+        let mut next_ids: Vec<i64> = Vec::new();
+        for pid in &frontier {
+            for row in q(
+                rb,
+                "SELECT cat_id AS cat_id FROM ecs_category WHERE parent_id = ? AND is_show = 1",
+                vec![json!(pid)],
             )
-            .map_err(db_err)?;
-        if exists == 0 {
-            return Err(AppError::NotFound("category not found".to_string()));
-        }
-        // Collect descendant category ids (the schema has no closure table; walk one level chain).
-        let mut cat_ids = vec![category_id];
-        let mut frontier = vec![category_id];
-        loop {
-            let mut next_ids: Vec<i64> = Vec::new();
+            .await?
             {
-                let mut stmt = conn
-                    .prepare("SELECT cat_id FROM ecs_category WHERE parent_id = ?1 AND is_show = 1")
-                    .map_err(db_err)?;
-                for pid in &frontier {
-                    let rows = stmt
-                        .query_map([pid], |r| r.get::<_, i64>(0))
-                        .map_err(db_err)?;
-                    for row in rows {
-                        let cid = row.map_err(db_err)?;
-                        if !cat_ids.contains(&cid) {
-                            cat_ids.push(cid);
-                            next_ids.push(cid);
-                        }
-                    }
+                let cid = col_i64(&row, "cat_id");
+                if !cat_ids.contains(&cid) {
+                    cat_ids.push(cid);
+                    next_ids.push(cid);
                 }
             }
-            if next_ids.is_empty() {
-                break;
-            }
-            frontier = next_ids;
         }
-        let placeholders = cat_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let params: Vec<Box<dyn rusqlite::ToSql>> =
-            cat_ids.into_iter().map(|c| Box::new(c) as Box<dyn rusqlite::ToSql>).collect();
-        let total: i64 = {
-            let sql = format!(
-                "SELECT COUNT(*) FROM ecs_goods WHERE is_on_sale = 1 AND is_delete = 0 AND cat_id IN ({placeholders})"
-            );
-            let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            conn.query_row(&sql, params_ref.as_slice(), |r| r.get(0))
-                .map_err(db_err)?
-        };
-        let sql = format!(
-            "SELECT goods_id, goods_name, shop_price, market_price, goods_brief, goods_thumb FROM ecs_goods
-             WHERE is_on_sale = 1 AND is_delete = 0 AND cat_id IN ({placeholders})
+        if next_ids.is_empty() {
+            break;
+        }
+        frontier = next_ids;
+    }
+    let placeholders = cat_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let mut args: Vec<Value> = cat_ids.iter().map(|c| json!(c)).collect();
+    let total_row = q1(
+        rb,
+        &format!(
+            "SELECT COUNT(*) AS cnt FROM ecs_goods WHERE is_on_sale = 1 AND is_delete = 0 AND cat_id IN ({placeholders})"
+        ),
+        args.clone(),
+    )
+    .await?
+    .unwrap_or_default();
+    let total = col_i64(&total_row, "cnt");
+    args.push(json!(page_size));
+    args.push(json!(offset));
+    let items = q(
+        rb,
+        &format!(
+            "SELECT {GOODS_LIST_COLS} FROM ecs_goods WHERE is_on_sale = 1 AND is_delete = 0 AND cat_id IN ({placeholders})
              ORDER BY sort_order, goods_id DESC LIMIT ? OFFSET ?"
-        );
-        let mut params = params;
-        params.push(Box::new(page_size));
-        params.push(Box::new(offset));
-        let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
-        let rows = stmt
-            .query_map(params_ref.as_slice(), |r| {
-                let price: f64 = r.get(2)?;
-                let mp: f64 = r.get(3)?;
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "name": r.get::<_, String>(1)?,
-                    "price": cents_to_string((price * 100.0).round() as i64),
-                    "market_price": cents_to_string((mp * 100.0).round() as i64),
-                    "brief": r.get::<_, String>(4)?,
-                    "thumb": r.get::<_, String>(5)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({"page": page_no, "page_size": page_size, "total": total, "items": items}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+        ),
+        args,
+    )
+    .await?
+    .iter()
+    .map(goods_item)
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
 }
 
 /// GET /api/v1/compare?goods_ids=12,14
 pub async fn compare(
     State(state): State<AppState>,
-    Query(q): Query<GoodsListQuery>,
+    Query(qp): Query<GoodsListQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let raw = q.goods_ids.ok_or_else(|| {
-        AppError::Validation("goods_ids is required".to_string())
-    })?;
+    let raw = qp.goods_ids.ok_or_else(|| AppError::Validation("goods_ids is required".to_string()))?;
     let ids: Vec<i64> = raw
         .split(',')
         .map(|s| s.trim().parse::<i64>())
@@ -517,42 +425,31 @@ pub async fn compare(
     if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
         return Err(AppError::Validation("goods_ids must be unique".to_string()));
     }
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let mut items = Vec::new();
-        for goods_id in &ids {
-            let row = conn
-                .query_row(
-                    "SELECT goods_id, goods_name, shop_price, market_price, goods_brief, goods_number
-                     FROM ecs_goods WHERE goods_id = ?1 AND is_on_sale = 1 AND is_delete = 0",
-                    [goods_id],
-                    |r| {
-                        let price: f64 = r.get(2)?;
-                        let market: f64 = r.get(3)?;
-                        Ok(json!({
-                            "id": r.get::<_, i64>(0)?,
-                            "name": r.get::<_, String>(1)?,
-                            "price": cents_to_string((price * 100.0).round() as i64),
-                            "market_price": cents_to_string((market * 100.0).round() as i64),
-                            "brief": r.get::<_, String>(4)?,
-                            "stock": r.get::<_, i64>(5)?,
-                        }))
-                    },
-                )
-                .optional()
-                .map_err(db_err)?;
-            match row {
-                Some(v) => items.push(v),
-                // Do not reveal invisible goods in comparison results.
-                None => return Err(AppError::NotFound(format!("goods {goods_id} not found"))),
-            }
-        }
-        Ok(json!({"items": items}))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    let rb = state.rb;
+    let mut items = Vec::new();
+    for goods_id in &ids {
+        let row = q1(
+            rb,
+            "SELECT goods_id AS goods_id, goods_name AS goods_name, shop_price AS shop_price, market_price AS market_price,
+                    goods_brief AS goods_brief, goods_number AS goods_number
+             FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
+            vec![json!(goods_id)],
+        )
+        .await?;
+        let Some(row) = row else {
+            // Do not reveal invisible goods in comparison results.
+            return Err(AppError::NotFound(format!("goods {goods_id} not found")));
+        };
+        items.push(json!({
+            "id": col_i64(&row, "goods_id"),
+            "name": col_str(&row, "goods_name"),
+            "price": cents_to_string(col_cents(&row, "shop_price")),
+            "market_price": cents_to_string(col_cents(&row, "market_price")),
+            "brief": col_str(&row, "goods_brief"),
+            "stock": col_i64(&row, "goods_number"),
+        }));
+    }
+    Ok(Json(json!({"items": items})))
 }
 
 /// POST /api/v1/goods/{id}/price-quote
@@ -572,77 +469,53 @@ pub async fn price_quote(
     if body.quantity < 1 || body.quantity > 999 {
         return Err(AppError::Validation("quantity must be between 1 and 999".to_string()));
     }
-    let db = state.db.clone();
-    let quantity = body.quantity;
-    let product_id = body.product_id;
-    let attribute_ids = body.attribute_ids.unwrap_or_default();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let row = conn
-            .query_row(
-                "SELECT goods_id, shop_price, goods_number FROM ecs_goods WHERE goods_id = ?1 AND is_on_sale = 1 AND is_delete = 0",
-                [goods_id],
-                |r| {
-                    let shop_price: f64 = r.get(1)?;
-                    Ok((r.get::<_, i64>(0)?, (shop_price * 100.0).round() as i64, r.get::<_, i64>(2)?))
-                },
-            )
-            .optional()
-            .map_err(db_err)?;
-        let Some((gid, base_price, mut stock)) = row else {
-            return Err(AppError::NotFound("goods not found".to_string()));
-        };
-        let _ = gid;
-        // Attribute price deltas are validated against the goods' own attributes.
-        let mut unit_price = base_price;
-        for attr_id in &attribute_ids {
-            let attr_price: Option<String> = conn
-                .query_row(
-                    "SELECT attr_price FROM ecs_goods_attr WHERE goods_attr_id = ?1 AND goods_id = ?2",
-                    [attr_id, &goods_id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(db_err)?;
-            match attr_price {
-                Some(price_str) => {
-                    let delta_cents = crate::shared::util::parse_money_cents(&price_str, "attr_price")?;
-                    unit_price += delta_cents;
-                }
-                None => return Err(AppError::Validation(format!("attribute {attr_id} does not belong to goods {goods_id}"))),
-            }
-        }
-        // SKU product price overrides base price when provided.
-        if let Some(pid) = product_id {
-            let product_row: Option<i64> = conn
-                .query_row(
-                    "SELECT product_number FROM ecs_products WHERE product_id = ?1 AND goods_id = ?2",
-                    [pid, goods_id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(db_err)?;
-            match product_row {
-                Some(pn) => stock = pn,
-                None => return Err(AppError::Validation(format!("product {pid} does not belong to goods {goods_id}"))),
-            }
-        }
-        let stock_available = stock.max(0);
-        let total = unit_price
-            .checked_mul(quantity)
-            .ok_or_else(|| AppError::Validation("total is out of range".to_string()))?;
-        Ok(json!({
-            "goods_id": goods_id,
-            "quantity": quantity,
-            "unit_price": cents_to_string(unit_price),
-            "total": cents_to_string(total),
-            "currency": "CNY",
-            "stock_available": stock_available,
-        }))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    let rb = state.rb;
+    let row = q1(
+        rb,
+        "SELECT goods_id AS goods_id, shop_price AS shop_price, goods_number AS goods_number
+         FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
+        vec![json!(goods_id)],
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("goods not found".to_string()))?;
+    let mut unit_price = col_cents(&row, "shop_price");
+    let mut stock = col_i64(&row, "goods_number");
+    for attr_id in body.attribute_ids.unwrap_or_default() {
+        let attr_row = q1(
+            rb,
+            "SELECT attr_price AS attr_price FROM ecs_goods_attr WHERE goods_attr_id = ? AND goods_id = ?",
+            vec![json!(attr_id), json!(goods_id)],
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::Validation(format!("attribute {attr_id} does not belong to goods {goods_id}"))
+        })?;
+        unit_price += col_cents(&attr_row, "attr_price");
+    }
+    if let Some(pid) = body.product_id {
+        let product_row = q1(
+            rb,
+            "SELECT product_number AS product_number FROM ecs_products WHERE product_id = ? AND goods_id = ?",
+            vec![json!(pid), json!(goods_id)],
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::Validation(format!("product {pid} does not belong to goods {goods_id}"))
+        })?;
+        stock = col_i64(&product_row, "product_number");
+    }
+    let stock_available = stock.max(0);
+    let total = unit_price
+        .checked_mul(body.quantity)
+        .ok_or_else(|| AppError::Validation("total is out of range".to_string()))?;
+    Ok(Json(json!({
+        "goods_id": goods_id,
+        "quantity": body.quantity,
+        "unit_price": cents_to_string(unit_price),
+        "total": cents_to_string(total),
+        "currency": "CNY",
+        "stock_available": stock_available,
+    })))
 }
 
 /// GET /api/v1/goods/{id}/gallery
@@ -651,43 +524,37 @@ pub async fn goods_gallery(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let goods_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let goods_name: Option<String> = conn
-            .query_row(
-                "SELECT goods_name FROM ecs_goods WHERE goods_id = ?1 AND is_on_sale = 1 AND is_delete = 0",
-                [goods_id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let Some(goods_name) = goods_name else {
-            return Err(AppError::NotFound("goods not found".to_string()));
-        };
-        let mut stmt = conn
-            .prepare("SELECT img_id, img_url, img_desc, thumb_url, img_original FROM ecs_goods_gallery WHERE goods_id = ?1 ORDER BY img_id")
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([goods_id], |r| {
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "url": r.get::<_, String>(1)?,
-                    "desc": r.get::<_, String>(2)?,
-                    "thumb": r.get::<_, String>(3)?,
-                    "original": r.get::<_, String>(4)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let images: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        if images.is_empty() {
-            return Err(AppError::NotFound("goods gallery is empty".to_string()));
-        }
-        Ok(json!({"goods_id": goods_id, "name": goods_name, "images": images}))
+    let rb = state.rb;
+    let goods_name = q1(
+        rb,
+        "SELECT goods_name AS goods_name FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
+        vec![json!(goods_id)],
+    )
+    .await?
+    .map(|r| col_str(&r, "goods_name"))
+    .ok_or_else(|| AppError::NotFound("goods not found".to_string()))?;
+    let images = q(
+        rb,
+        "SELECT img_id AS img_id, img_url AS img_url, img_desc AS img_desc, thumb_url AS thumb_url, img_original AS img_original
+         FROM ecs_goods_gallery WHERE goods_id = ? ORDER BY img_id",
+        vec![json!(goods_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "img_id"),
+            "url": col_str(&r, "img_url"),
+            "desc": col_str(&r, "img_desc"),
+            "thumb": col_str(&r, "thumb_url"),
+            "original": col_str(&r, "img_original"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    if images.is_empty() {
+        return Err(AppError::NotFound("goods gallery is empty".to_string()));
+    }
+    Ok(Json(json!({"goods_id": goods_id, "name": goods_name, "images": images})))
 }
 
 /// GET /api/v1/goods/{id}/comments (public list)
@@ -696,44 +563,47 @@ pub async fn goods_comments(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let goods_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM ecs_goods WHERE goods_id = ?1 AND is_on_sale = 1 AND is_delete = 0",
-                [goods_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if exists == 0 {
-            return Err(AppError::NotFound("goods not found".to_string()));
-        }
-        let mut stmt = conn
-            .prepare(
-                "SELECT comment_id, user_name, content, add_time FROM ecs_comment
-                 WHERE id_value = ?1 AND comment_type = 0 AND status = 1 ORDER BY comment_id DESC",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([goods_id], |r| {
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "user_name": r.get::<_, String>(1)?,
-                    "content": r.get::<_, String>(2)?,
-                    "created_at": r.get::<_, i64>(3)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        Ok(json!({"items": items}))
+    let rb = state.rb;
+    let exists = q1(
+        rb,
+        "SELECT COUNT(*) AS cnt FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
+        vec![json!(goods_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "cnt"))
+    .unwrap_or(0);
+    if exists == 0 {
+        return Err(AppError::NotFound("goods not found".to_string()));
+    }
+    let items = q(
+        rb,
+        "SELECT comment_id AS comment_id, user_name AS user_name, content AS content, add_time AS add_time
+         FROM ecs_comment WHERE id_value = ? AND comment_type = 0 AND status = 1 ORDER BY comment_id DESC",
+        vec![json!(goods_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "comment_id"),
+            "user_name": col_str(&r, "user_name"),
+            "content": col_str(&r, "content"),
+            "created_at": col_i64(&r, "add_time"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"items": items})))
 }
 
-/// GET /api/v1/exchange-goods/{id} detail lives in marketing module; this handles 404 fallback
-pub fn not_found_response() -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({"code": "not_found", "message": "not found"}))).into_response()
+/// Shared write helper kept for symmetry with other modules.
+#[allow(dead_code)]
+async fn _noop_write(rb: &rbatis::rbatis::RBatis) -> Result<(), AppError> {
+    e(rb, "SELECT 1", vec![]).await?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn _keep_col_helpers(row: &Value) {
+    let _ = col_f64(row, "x");
+    let _ = col_opt_str(row, "x");
 }

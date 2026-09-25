@@ -2,18 +2,14 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::http::auth::AuthUser;
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
-use crate::shared::util::{cents_to_string, parse_money_cents};
-
-fn db_err(e: rusqlite::Error) -> AppError {
-    AppError::Internal(e.into())
-}
+use crate::shared::rbutil::{col_i64, col_str, col_cents, e, q, q1};
+use crate::shared::util::cents_to_string;
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
@@ -34,89 +30,78 @@ pub async fn cart_add(
     auth: AuthUser,
     Json(body): Json<CartAddRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    if body.quantity < 1 || body.quantity > 999 {
+    if !(1..=999).contains(&body.quantity) {
         return Err(AppError::Validation("quantity must be between 1 and 999".to_string()));
     }
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    let goods_id = body.goods_id;
-    let quantity = body.quantity;
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        let (name, price_cents, stock): (String, i64, i64) = tx
-            .query_row(
-                "SELECT goods_name, shop_price, goods_number FROM ecs_goods
-                 WHERE goods_id = ?1 AND is_on_sale = 1 AND is_delete = 0",
-                [goods_id],
-                |r| {
-                    let price: f64 = r.get(1)?;
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        (price * 100.0).round() as i64,
-                        r.get(2)?,
-                    ))
-                },
+    let rb = state.rb;
+    let tx = crate::infrastructure::db::begin(rb).await?;
+    let goods = q1(
+        &tx,
+        "SELECT goods_name AS goods_name, shop_price AS shop_price, goods_number AS goods_number
+         FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
+        vec![json!(body.goods_id)],
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("goods not found".to_string()))?;
+    let price_cents = col_cents(&goods, "shop_price");
+    let stock = col_i64(&goods, "goods_number");
+    let existing = q1(
+        &tx,
+        "SELECT goods_number AS goods_number FROM ecs_cart WHERE user_id = ? AND goods_id = ?",
+        vec![json!(auth.user_id), json!(body.goods_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "goods_number"));
+    let new_qty = existing.unwrap_or(0) + body.quantity;
+    if new_qty > stock {
+        return Err(AppError::Conflict("insufficient stock".to_string()));
+    }
+    match existing {
+        Some(_) => {
+            e(
+                &tx,
+                "UPDATE ecs_cart SET goods_number = goods_number + ?, version = version + 1
+                 WHERE user_id = ? AND goods_id = ?",
+                vec![json!(body.quantity), json!(auth.user_id), json!(body.goods_id)],
             )
-            .optional()
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::NotFound("goods not found".to_string()))?;
-        let existing: Option<i64> = tx
-            .query_row(
-                "SELECT goods_number FROM ecs_cart WHERE user_id = ?1 AND goods_id = ?2",
-                [user_id, goods_id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let new_qty = existing.unwrap_or(0) + quantity;
-        if new_qty > stock {
-            return Err(AppError::Conflict("insufficient stock".to_string()));
+            .await?;
         }
-        match existing {
-            Some(_) => {
-                tx.execute(
-                    "UPDATE ecs_cart SET goods_number = goods_number + ?1, version = version + 1
-                     WHERE user_id = ?2 AND goods_id = ?3",
-                    rusqlite::params![quantity, user_id, goods_id],
-                )
-                .map_err(db_err)?;
-            }
-            None => {
-                tx.execute(
-                    "INSERT INTO ecs_cart (user_id, goods_id, goods_number, version) VALUES (?1, ?2, ?3, 1)",
-                    rusqlite::params![user_id, goods_id, quantity],
-                )
-                .map_err(db_err)?;
-            }
+        None => {
+            e(
+                &tx,
+                "INSERT INTO ecs_cart (user_id, goods_id, goods_number, version) VALUES (?, ?, ?, 1)",
+                vec![json!(auth.user_id), json!(body.goods_id), json!(body.quantity)],
+            )
+            .await?;
         }
-        let rec_id: i64 = tx
-            .query_row(
-                "SELECT rec_id FROM ecs_cart WHERE user_id = ?1 AND goods_id = ?2",
-                [user_id, goods_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        let (version, quantity): (i64, i64) = tx
-            .query_row(
-                "SELECT version, goods_number FROM ecs_cart WHERE rec_id = ?1",
-                [rec_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
-        Ok(json!({
-            "id": rec_id,
-            "goods_id": goods_id,
-            "name": name,
+    }
+    let cart_row = q1(
+        &tx,
+        "SELECT rec_id AS rec_id, version AS version, goods_number AS goods_number
+         FROM ecs_cart WHERE user_id = ? AND goods_id = ?",
+        vec![json!(auth.user_id), json!(body.goods_id)],
+    )
+    .await?
+    .unwrap_or_default();
+    let rec_id = col_i64(&cart_row, "rec_id");
+    let version = col_i64(&cart_row, "version");
+    let quantity = col_i64(&cart_row, "goods_number");
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": if rec_id > 0 { rec_id } else { insert_id_dummy() },
+            "goods_id": body.goods_id,
+            "name": col_str(&goods, "goods_name"),
             "price": cents_to_string(price_cents),
             "quantity": quantity,
             "version": version,
-        }))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok((StatusCode::CREATED, Json(result)))
+        })),
+    ))
+}
+
+fn insert_id_dummy() -> i64 {
+    0
 }
 
 /// GET /api/v1/me/cart
@@ -124,40 +109,32 @@ pub async fn cart_list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let user_id = auth.user_id;
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT c.rec_id, c.goods_id, g.goods_name, g.shop_price, c.goods_number, c.version
-                 FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
-                 WHERE c.user_id = ?1 ORDER BY c.rec_id",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([user_id], |r| {
-                let price: f64 = r.get(3)?;
-                Ok(json!({
-                    "id": r.get::<_, i64>(0)?,
-                    "goods_id": r.get::<_, i64>(1)?,
-                    "name": r.get::<_, String>(2)?,
-                    "price": cents_to_string((price * 100.0).round() as i64),
-                    "quantity": r.get::<_, i64>(4)?,
-                    "version": r.get::<_, i64>(5)?,
-                }))
-            })
-            .map_err(db_err)?;
-        let items: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        let total_quantity: i64 = items
-            .iter()
-            .filter_map(|i| i.get("quantity").and_then(|q| q.as_i64()))
-            .sum();
-        Ok(json!({"items": items, "total_quantity": total_quantity}))
+    let items = q(
+        state.rb,
+        "SELECT c.rec_id AS rec_id, c.goods_id AS goods_id, g.goods_name AS goods_name, g.shop_price AS shop_price,
+                c.goods_number AS goods_number, c.version AS version
+         FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
+         WHERE c.user_id = ? ORDER BY c.rec_id",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "rec_id"),
+            "goods_id": col_i64(&r, "goods_id"),
+            "name": col_str(&r, "goods_name"),
+            "price": cents_to_string(col_cents(&r, "shop_price")),
+            "quantity": col_i64(&r, "goods_number"),
+            "version": col_i64(&r, "version"),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    let total_quantity: i64 = items
+        .iter()
+        .filter_map(|i| i.get("quantity").and_then(|v| v.as_i64()))
+        .sum();
+    Ok(Json(json!({"items": items, "total_quantity": total_quantity})))
 }
 
 #[derive(Deserialize)]
@@ -174,42 +151,35 @@ pub async fn cart_update(
     Json(body): Json<CartPatchRequest>,
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
-    if body.quantity < 1 || body.quantity > 999 {
+    if !(1..=999).contains(&body.quantity) {
         return Err(AppError::Validation("quantity must be between 1 and 999".to_string()));
     }
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let mut conn = db.blocking_lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        // Optimistic lock: WHERE matches id, user and version.
-        let updated = tx
-            .execute(
-                "UPDATE ecs_cart SET goods_number = ?1, version = version + 1
-                 WHERE rec_id = ?2 AND user_id = ?3 AND version = ?4",
-                rusqlite::params![body.quantity, rec_id, user_id, body.version],
-            )
-            .map_err(db_err)?;
-        if updated == 0 {
-            return Err(AppError::Conflict("cart version is stale".to_string()));
-        }
-        // Stock guard after quantity change.
-        let over: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
-                 WHERE c.rec_id = ?1 AND c.goods_number > g.goods_number",
-                [rec_id],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if over > 0 {
-            return Err(AppError::Conflict("insufficient stock".to_string()));
-        }
-        tx.commit().map_err(db_err)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    // Optimistic lock: WHERE matches id, user and version.
+    let updated = e(
+        &tx,
+        "UPDATE ecs_cart SET goods_number = ?, version = version + 1
+         WHERE rec_id = ? AND user_id = ? AND version = ?",
+        vec![json!(body.quantity), json!(rec_id), json!(auth.user_id), json!(body.version)],
+    )
+    .await?;
+    if updated.rows_affected == 0 {
+        return Err(AppError::Conflict("cart version is stale".to_string()));
+    }
+    // Stock guard after quantity change.
+    let over = q1(
+        &tx,
+        "SELECT COUNT(*) AS cnt FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
+         WHERE c.rec_id = ? AND c.goods_number > g.goods_number",
+        vec![json!(rec_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "cnt"))
+    .unwrap_or(0);
+    if over > 0 {
+        return Err(AppError::Conflict("insufficient stock".to_string()));
+    }
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -220,23 +190,15 @@ pub async fn cart_delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
-        let conn = db.blocking_lock();
-        let deleted = conn
-            .execute(
-                "DELETE FROM ecs_cart WHERE rec_id = ?1 AND user_id = ?2",
-                [rec_id, user_id],
-            )
-            .map_err(db_err)?;
-        if deleted == 0 {
-            return Err(AppError::NotFound("cart item not found".to_string()));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
+    let deleted = e(
+        state.rb,
+        "DELETE FROM ecs_cart WHERE rec_id = ? AND user_id = ?",
+        vec![json!(rec_id), json!(auth.user_id)],
+    )
+    .await?;
+    if deleted.rows_affected == 0 {
+        return Err(AppError::NotFound("cart item not found".to_string()));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -245,46 +207,40 @@ pub async fn checkout_options(
     State(state): State<AppState>,
     _auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let shipping: Vec<Value> = {
-            let mut stmt = conn
-                .prepare("SELECT shipping_id, shipping_name, shipping_fee FROM ecs_shipping WHERE enabled = 1 ORDER BY shipping_id")
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([], |r| {
-                    let fee: f64 = r.get(2)?;
-                    Ok(json!({
-                        "id": r.get::<_, i64>(0)?,
-                        "name": r.get::<_, String>(1)?,
-                        "fee": cents_to_string((fee * 100.0).round() as i64),
-                    }))
-                })
-                .map_err(db_err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
-        };
-        let payments: Vec<Value> = {
-            let mut stmt = conn
-                .prepare("SELECT pay_id, pay_name, pay_fee FROM ecs_payment WHERE enabled = 1 ORDER BY pay_id")
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([], |r| {
-                    let fee: f64 = r.get(2)?;
-                    Ok(json!({
-                        "id": r.get::<_, i64>(0)?,
-                        "name": r.get::<_, String>(1)?,
-                        "fee": cents_to_string((fee * 100.0).round() as i64),
-                    }))
-                })
-                .map_err(db_err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
-        };
-        Ok(json!({"shipping": shipping, "payment": payments}))
+    let rb = state.rb;
+    let shipping = q(
+        rb,
+        "SELECT shipping_id AS shipping_id, shipping_name AS shipping_name, shipping_fee AS shipping_fee
+         FROM ecs_shipping WHERE enabled = 1 ORDER BY shipping_id",
+        vec![],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "shipping_id"),
+            "name": col_str(&r, "shipping_name"),
+            "fee": cents_to_string(col_cents(&r, "shipping_fee")),
+        })
     })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
+    .collect::<Vec<_>>();
+    let payments = q(
+        rb,
+        "SELECT pay_id AS pay_id, pay_name AS pay_name, pay_fee AS pay_fee
+         FROM ecs_payment WHERE enabled = 1 ORDER BY pay_id",
+        vec![],
+    )
+    .await?
+    .into_iter()
+    .map(|r| {
+        json!({
+            "id": col_i64(&r, "pay_id"),
+            "name": col_str(&r, "pay_name"),
+            "fee": cents_to_string(col_cents(&r, "pay_fee")),
+        })
+    })
+    .collect::<Vec<_>>();
+    Ok(Json(json!({"shipping": shipping, "payment": payments})))
 }
 
 #[derive(Deserialize)]
@@ -300,100 +256,70 @@ pub async fn checkout_quote(
     auth: AuthUser,
     Json(body): Json<CheckoutQuoteRequest>,
 ) -> Result<Json<Value>, AppError> {
-    let db = state.db.clone();
-    let user_id = auth.user_id;
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, AppError> {
-        let conn = db.blocking_lock();
-        let address: Option<(String, String)> = conn
-            .query_row(
-                "SELECT consignee, address FROM ecs_user_address WHERE address_id = ?1 AND user_id = ?2",
-                [body.address_id, user_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(db_err)?;
-        let Some((consignee, address)) = address else {
-            return Err(AppError::NotFound("address not found".to_string()));
-        };
-        let shipping_fee: i64 = conn
-            .query_row(
-                "SELECT shipping_fee FROM ecs_shipping WHERE shipping_id = ?1 AND enabled = 1",
-                [body.shipping_id],
-                |r| r.get::<_, f64>(0).map(|f| (f * 100.0).round() as i64),
-            )
-            .optional()
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::NotFound("shipping not found or disabled".to_string()))?;
-        let payment_fee: i64 = conn
-            .query_row(
-                "SELECT pay_fee FROM ecs_payment WHERE pay_id = ?1 AND enabled = 1",
-                [body.payment_id],
-                |r| r.get::<_, f64>(0).map(|f| (f * 100.0).round() as i64),
-            )
-            .optional()
-            .map_err(db_err)?
-            .ok_or_else(|| AppError::NotFound("payment not found or disabled".to_string()))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT c.rec_id, c.goods_id, g.goods_name, g.shop_price, c.goods_number
-                 FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
-                 WHERE c.user_id = ?1 AND g.is_on_sale = 1 AND g.is_delete = 0 ORDER BY c.rec_id",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([user_id], |r| {
-                let price: f64 = r.get(3)?;
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    (price * 100.0).round() as i64,
-                    r.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(db_err)?;
-        let rows: Vec<(i64, i64, String, i64, i64)> =
-            rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?;
-        if rows.is_empty() {
-            return Err(AppError::Validation("cart is empty".to_string()));
-        }
-        let mut goods_amount = 0i64;
-        let mut items = Vec::new();
-        for (rec_id, goods_id, name, price, quantity) in rows {
-            goods_amount = goods_amount
-                .checked_add(price.checked_mul(quantity).ok_or_else(|| {
-                    AppError::Validation("amount overflow".to_string())
-                })?)
-                .ok_or_else(|| AppError::Validation("amount overflow".to_string()))?;
-            items.push(json!({
-                "cart_id": rec_id,
-                "goods_id": goods_id,
-                "name": name,
-                "price": cents_to_string(price),
-                "quantity": quantity,
-            }));
-        }
-        let order_amount = goods_amount + shipping_fee + payment_fee;
-        Ok(json!({
-            "address_id": body.address_id,
-            "consignee": consignee,
-            "address": address,
-            "shipping_id": body.shipping_id,
-            "payment_id": body.payment_id,
-            "items": items,
-            "goods_amount": cents_to_string(goods_amount),
-            "shipping_fee": cents_to_string(shipping_fee),
-            "payment_fee": cents_to_string(payment_fee),
-            "order_amount": cents_to_string(order_amount),
-        }))
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.into()))??;
-    Ok(Json(result))
-}
-
-/// Keep parse_money_cents in scope for future checkout extensions.
-#[allow(dead_code)]
-fn _parse_money_kept() -> Result<i64, AppError> {
-    parse_money_cents("0.00", "amount")
+    let rb = state.rb;
+    let address = q1(
+        rb,
+        "SELECT consignee AS consignee, address AS address FROM ecs_user_address WHERE address_id = ? AND user_id = ?",
+        vec![json!(body.address_id), json!(auth.user_id)],
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("address not found".to_string()))?;
+    let shipping_fee = q1(
+        rb,
+        "SELECT shipping_fee AS shipping_fee FROM ecs_shipping WHERE shipping_id = ? AND enabled = 1",
+        vec![json!(body.shipping_id)],
+    )
+    .await?
+    .map(|r| col_cents(&r, "shipping_fee"))
+    .ok_or_else(|| AppError::NotFound("shipping not found or disabled".to_string()))?;
+    let payment_fee = q1(
+        rb,
+        "SELECT pay_fee AS pay_fee FROM ecs_payment WHERE pay_id = ? AND enabled = 1",
+        vec![json!(body.payment_id)],
+    )
+    .await?
+    .map(|r| col_cents(&r, "pay_fee"))
+    .ok_or_else(|| AppError::NotFound("payment not found or disabled".to_string()))?;
+    let rows = q(
+        rb,
+        "SELECT c.rec_id AS rec_id, c.goods_id AS goods_id, g.goods_name AS goods_name, g.shop_price AS shop_price, c.goods_number AS goods_number
+         FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
+         WHERE c.user_id = ? AND g.is_on_sale = 1 AND g.is_delete = 0 ORDER BY c.rec_id",
+        vec![json!(auth.user_id)],
+    )
+    .await?;
+    if rows.is_empty() {
+        return Err(AppError::Validation("cart is empty".to_string()));
+    }
+    let mut goods_amount = 0i64;
+    let mut items = Vec::new();
+    for row in &rows {
+        let price = col_cents(row, "shop_price");
+        let quantity = col_i64(row, "goods_number");
+        goods_amount = goods_amount
+            .checked_add(price.checked_mul(quantity).ok_or_else(|| {
+                AppError::Validation("amount overflow".to_string())
+            })?)
+            .ok_or_else(|| AppError::Validation("amount overflow".to_string()))?;
+        items.push(json!({
+            "cart_id": col_i64(row, "rec_id"),
+            "goods_id": col_i64(row, "goods_id"),
+            "name": col_str(row, "goods_name"),
+            "price": cents_to_string(price),
+            "quantity": quantity,
+        }));
+    }
+    let order_amount = goods_amount + shipping_fee + payment_fee;
+    Ok(Json(json!({
+        "address_id": body.address_id,
+        "consignee": col_str(&address, "consignee"),
+        "address": col_str(&address, "address"),
+        "shipping_id": body.shipping_id,
+        "payment_id": body.payment_id,
+        "items": items,
+        "goods_amount": cents_to_string(goods_amount),
+        "shipping_fee": cents_to_string(shipping_fee),
+        "payment_fee": cents_to_string(payment_fee),
+        "order_amount": cents_to_string(order_amount),
+    })))
 }
