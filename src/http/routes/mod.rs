@@ -1,3 +1,4 @@
+pub mod community;
 pub mod content;
 pub mod goods;
 pub mod health;
@@ -8,7 +9,7 @@ use axum::Router;
 pub use health::health_routes;
 
 pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
-    use axum::routing::{get, post};
+    use axum::routing::{delete, get, post};
     Router::new()
         // goods context
         .route("/api/v1/home", get(goods::home))
@@ -47,4 +48,17 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
             "/api/v1/exchange-goods/:id",
             get(marketing::exchange_goods_detail),
         )
+        // community context
+        .route("/api/v1/messages", get(community::messages_list).post(community::messages_create))
+        .route("/api/v1/me/messages", get(community::me_messages))
+        .route("/api/v1/me/messages/:id", delete(community::me_message_delete))
+        .route(
+            "/api/v1/goods/:id/comments",
+            get(goods::goods_comments).post(community::goods_comment_create),
+        )
+        .route("/api/v1/me/comments", get(community::me_comments))
+        .route("/api/v1/me/comments/:id", delete(community::me_comment_delete))
+        .route("/api/v1/tags", get(community::tags_cloud))
+        .route("/api/v1/me/tags", get(community::me_tags).delete(community::me_tag_delete))
+        .route("/api/v1/goods/:id/tags", post(community::goods_tag_create))
 }
