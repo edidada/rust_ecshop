@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod community;
 pub mod content;
 pub mod goods;
@@ -10,7 +11,7 @@ use axum::Router;
 pub use health::health_routes;
 
 pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
-    use axum::routing::{delete, get, post};
+    use axum::routing::{delete, get, patch, post};
     Router::new()
         // goods context
         .route("/api/v1/home", get(goods::home))
@@ -69,4 +70,12 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/goods-widget.js", get(widgets::goods_widget))
         .route("/sitemap.xml", get(widgets::sitemap))
         .route("/feed.xml", get(widgets::feed))
+        // auth context
+        .route("/api/v1/auth/availability/username", post(auth::username_availability))
+        .route("/api/v1/auth/availability/email", post(auth::email_availability))
+        .route("/api/v1/auth/register", post(auth::register))
+        .route("/api/v1/auth/login", post(auth::login))
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .route("/api/v1/me", get(auth::me).patch(auth::me_patch))
+        .route("/api/v1/me/password", patch(auth::me_password_patch))
 }
