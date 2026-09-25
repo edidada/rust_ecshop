@@ -1,6 +1,7 @@
 pub mod content;
 pub mod goods;
 pub mod health;
+pub mod marketing;
 
 use axum::Router;
 
@@ -30,4 +31,20 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         )
         .route("/api/v1/shipping-options", get(content::shipping_options))
         .route("/api/v1/quotation", get(content::quotation))
+        // marketing context
+        .route("/api/v1/activities", get(marketing::activities))
+        .route("/api/v1/packages", get(marketing::packages))
+        .route("/api/v1/promotions", get(marketing::promotions))
+        .route("/api/v1/promotions/:id", get(marketing::promotion_detail))
+        .route("/api/v1/topics/:id", get(marketing::topic_detail))
+        .route("/api/v1/votes/current", get(marketing::votes_current))
+        .route(
+            "/api/v1/votes/:id/responses",
+            post(marketing::vote_respond),
+        )
+        .route("/api/v1/exchange-goods", get(marketing::exchange_goods))
+        .route(
+            "/api/v1/exchange-goods/:id",
+            get(marketing::exchange_goods_detail),
+        )
 }
