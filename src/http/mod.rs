@@ -1,7 +1,6 @@
-//! HTTP layer: router, middleware, handlers, DTO validation.
-//! Responsible for HTTP status codes and cookies only; no SQL or business rules.
-
+pub mod auth;
 pub mod error;
+pub mod middleware;
 pub mod routes;
 pub mod server;
 pub mod state;
