@@ -3,6 +3,7 @@ pub mod content;
 pub mod goods;
 pub mod health;
 pub mod marketing;
+pub mod widgets;
 
 use axum::Router;
 
@@ -61,4 +62,11 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/tags", get(community::tags_cloud))
         .route("/api/v1/me/tags", get(community::me_tags).delete(community::me_tag_delete))
         .route("/api/v1/goods/:id/tags", post(community::goods_tag_create))
+        // widgets and XML documents (top-level paths)
+        .route("/api/v1/ads/:id", get(widgets::ad_detail))
+        .route("/api/v1/ads/:id/click", post(widgets::ad_click))
+        .route("/cycle-image.xml", get(widgets::cycle_image))
+        .route("/goods-widget.js", get(widgets::goods_widget))
+        .route("/sitemap.xml", get(widgets::sitemap))
+        .route("/feed.xml", get(widgets::feed))
 }
