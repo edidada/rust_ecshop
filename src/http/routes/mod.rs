@@ -1,5 +1,6 @@
 pub mod account;
 pub mod auth;
+pub mod cart;
 pub mod community;
 pub mod content;
 pub mod goods;
@@ -99,4 +100,9 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/me/account/requests/:id", delete(account::account_request_cancel))
         .route("/api/v1/me/account/requests/:id/payment", post(account::account_request_payment))
         .route("/api/v1/me/account/transactions", get(account::account_transactions))
+        // cart and checkout context
+        .route("/api/v1/me/cart", get(cart::cart_list).post(cart::cart_add))
+        .route("/api/v1/me/cart/:id", patch(cart::cart_update).delete(cart::cart_delete))
+        .route("/api/v1/checkout/options", get(cart::checkout_options))
+        .route("/api/v1/checkout/quote", post(cart::checkout_quote))
 }
