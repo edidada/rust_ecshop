@@ -4,3 +4,5 @@ Cargo.lock.bak
 logs/
 .env
 data/
+.idea
+*.iml
