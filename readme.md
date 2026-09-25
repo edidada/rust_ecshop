@@ -2,6 +2,7 @@ D:\develops\git\github\rust\axum-web-app
 参考这个rust工程
 
 php http server项目
+添加git submodule
 [submodule "third_party/shopex-ecshop"]
 	path = third_party/shopex-ecshop
 	url = https://gitee.com/softtomorrow/ecshop
