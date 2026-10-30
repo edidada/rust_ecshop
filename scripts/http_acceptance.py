@@ -103,6 +103,9 @@ def apply_fixture_seed():
     if not DATABASE_URL.startswith("mysql:"):
         return
     source = (ROOT / "docs/sql/mysql/ci_seed.sql").read_text(encoding="utf-8-sig")
+    import re
+
+    source = re.sub(r"--[^\n]*", "", source)
     statement, quoted = [], False
     with mysql_connect() as connection:
         cursor = connection.cursor()
