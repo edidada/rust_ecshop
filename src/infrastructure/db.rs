@@ -71,6 +71,9 @@ async fn bootstrap_sqlite_schema(rb: &RBatis) -> Result<(), rbatis::Error> {
     for stmt in split_statements(compat) {
         rb.exec(&stmt, vec![]).await?;
     }
+    for stmt in split_statements(include_str!("../../docs/sql/sqlite/003_checkout.sql")) {
+        rb.exec(&stmt, vec![]).await?;
+    }
     // The dev schema lacks a few columns the API surface expects; add them
     // idempotently (ALTER TABLE errors are ignored when the column exists).
     for stmt in [
@@ -139,10 +142,14 @@ mod tests {
 
     #[test]
     fn split_statements_keeps_multi_line_statements_and_quoted_semicolons() {
-        let sql = "CREATE TABLE t (\n  id INTEGER,\n  note TEXT\n);\nINSERT INTO t VALUES (1, 'a;b');\n";
+        let sql =
+            "CREATE TABLE t (\n  id INTEGER,\n  note TEXT\n);\nINSERT INTO t VALUES (1, 'a;b');\n";
         let stmts = split_statements(sql);
         assert_eq!(stmts.len(), 2);
         assert!(stmts[0].contains("note TEXT"));
-        assert!(stmts[1].contains("'a;b'"), "quoted semicolon must not split: {stmts:?}");
+        assert!(
+            stmts[1].contains("'a;b'"),
+            "quoted semicolon must not split: {stmts:?}"
+        );
     }
 }

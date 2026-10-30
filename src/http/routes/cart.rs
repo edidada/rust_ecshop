@@ -8,13 +8,15 @@ use serde_json::{json, Value};
 use crate::http::auth::AuthUser;
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{col_i64, col_str, col_cents, e, q, q1};
+use crate::shared::rbutil::{col_cents, col_i64, col_str, e, q, q1};
 use crate::shared::util::cents_to_string;
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
         Ok(v) if v > 0 => Ok(v),
-        _ => Err(AppError::Validation("id must be a positive integer".to_string())),
+        _ => Err(AppError::Validation(
+            "id must be a positive integer".to_string(),
+        )),
     }
 }
 
@@ -22,6 +24,10 @@ fn parse_id(id: &str) -> Result<i64, AppError> {
 pub struct CartAddRequest {
     goods_id: i64,
     quantity: i64,
+    #[serde(default)]
+    product_id: i64,
+    #[serde(default)]
+    attribute_ids: Vec<i64>,
 }
 
 /// POST /api/v1/me/cart — same goods accumulates quantity atomically and bumps version.
@@ -31,7 +37,9 @@ pub async fn cart_add(
     Json(body): Json<CartAddRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if !(1..=999).contains(&body.quantity) {
-        return Err(AppError::Validation("quantity must be between 1 and 999".to_string()));
+        return Err(AppError::Validation(
+            "quantity must be between 1 and 999".to_string(),
+        ));
     }
     let rb = state.rb;
     let tx = crate::infrastructure::db::begin(rb).await?;
@@ -43,7 +51,6 @@ pub async fn cart_add(
     )
     .await?
     .ok_or_else(|| AppError::NotFound("goods not found".to_string()))?;
-    let price_cents = col_cents(&goods, "shop_price");
     let stock = col_i64(&goods, "goods_number");
     let existing = q1(
         &tx,
@@ -56,13 +63,47 @@ pub async fn cart_add(
     if new_qty > stock {
         return Err(AppError::Conflict("insufficient stock".to_string()));
     }
+    let price_cents = super::pricing::unit(
+        &tx,
+        body.goods_id,
+        new_qty,
+        body.product_id,
+        &body.attribute_ids,
+    )
+    .await?;
+    let old_spec = q1(
+        &tx,
+        "SELECT product_id,attributes FROM ecs_cart_spec WHERE user_id=? AND goods_id=?",
+        vec![json!(auth.user_id), json!(body.goods_id)],
+    )
+    .await?;
+    if existing.is_some() {
+        let old_product = old_spec
+            .as_ref()
+            .map(|r| col_i64(r, "product_id"))
+            .unwrap_or(0);
+        let old_attrs: Vec<i64> = old_spec
+            .as_ref()
+            .and_then(|r| serde_json::from_str(&col_str(r, "attributes")).ok())
+            .unwrap_or_default();
+        if old_product != body.product_id || old_attrs != body.attribute_ids {
+            return Err(AppError::Conflict(
+                "remove existing variant before adding another SKU".into(),
+            ));
+        }
+    }
+    e(&tx,"INSERT INTO ecs_cart_spec(user_id,goods_id,product_id,attributes) VALUES(?,?,?,?) ON CONFLICT(user_id,goods_id) DO UPDATE SET product_id=excluded.product_id,attributes=excluded.attributes",vec![json!(auth.user_id),json!(body.goods_id),json!(body.product_id),json!(serde_json::to_string(&body.attribute_ids).unwrap_or_default())]).await?;
     match existing {
         Some(_) => {
             e(
                 &tx,
                 "UPDATE ecs_cart SET goods_number = goods_number + ?, version = version + 1
                  WHERE user_id = ? AND goods_id = ?",
-                vec![json!(body.quantity), json!(auth.user_id), json!(body.goods_id)],
+                vec![
+                    json!(body.quantity),
+                    json!(auth.user_id),
+                    json!(body.goods_id),
+                ],
             )
             .await?;
         }
@@ -109,7 +150,7 @@ pub async fn cart_list(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let items = q(
+    let mut rows = q(
         state.rb,
         "SELECT c.rec_id AS rec_id, c.goods_id AS goods_id, g.goods_name AS goods_name, g.shop_price AS shop_price,
                 c.goods_number AS goods_number, c.version AS version
@@ -117,24 +158,28 @@ pub async fn cart_list(
          WHERE c.user_id = ? ORDER BY c.rec_id",
         vec![json!(auth.user_id)],
     )
-    .await?
-    .into_iter()
-    .map(|r| {
-        json!({
-            "id": col_i64(&r, "rec_id"),
-            "goods_id": col_i64(&r, "goods_id"),
-            "name": col_str(&r, "goods_name"),
-            "price": cents_to_string(col_cents(&r, "shop_price")),
-            "quantity": col_i64(&r, "goods_number"),
-            "version": col_i64(&r, "version"),
+    .await?;
+    super::pricing::cart(state.rb, auth.user_id, &mut rows).await?;
+    let items = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": col_i64(&r, "rec_id"),
+                "goods_id": col_i64(&r, "goods_id"),
+                "name": col_str(&r, "goods_name"),
+                "price": cents_to_string(col_cents(&r, "shop_price")),
+                "quantity": col_i64(&r, "goods_number"),
+                "version": col_i64(&r, "version"),
+            })
         })
-    })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     let total_quantity: i64 = items
         .iter()
         .filter_map(|i| i.get("quantity").and_then(|v| v.as_i64()))
         .sum();
-    Ok(Json(json!({"items": items, "total_quantity": total_quantity})))
+    Ok(Json(
+        json!({"items": items, "total_quantity": total_quantity}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -152,7 +197,9 @@ pub async fn cart_update(
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
     if !(1..=999).contains(&body.quantity) {
-        return Err(AppError::Validation("quantity must be between 1 and 999".to_string()));
+        return Err(AppError::Validation(
+            "quantity must be between 1 and 999".to_string(),
+        ));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
     // Optimistic lock: WHERE matches id, user and version.
@@ -160,12 +207,24 @@ pub async fn cart_update(
         &tx,
         "UPDATE ecs_cart SET goods_number = ?, version = version + 1
          WHERE rec_id = ? AND user_id = ? AND version = ?",
-        vec![json!(body.quantity), json!(rec_id), json!(auth.user_id), json!(body.version)],
+        vec![
+            json!(body.quantity),
+            json!(rec_id),
+            json!(auth.user_id),
+            json!(body.version),
+        ],
     )
     .await?;
     if updated.rows_affected == 0 {
         return Err(AppError::Conflict("cart version is stale".to_string()));
     }
+    let mut selected = q(
+        &tx,
+        "SELECT goods_id,goods_number FROM ecs_cart WHERE rec_id=? AND user_id=?",
+        vec![json!(rec_id), json!(auth.user_id)],
+    )
+    .await?;
+    super::pricing::cart(&tx, auth.user_id, &mut selected).await?;
     // Stock guard after quantity change.
     let over = q1(
         &tx,
@@ -190,15 +249,18 @@ pub async fn cart_delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    e(&tx,"DELETE FROM ecs_cart_spec WHERE user_id=? AND goods_id IN(SELECT goods_id FROM ecs_cart WHERE rec_id=? AND user_id=?)",vec![json!(auth.user_id),json!(rec_id),json!(auth.user_id)]).await?;
     let deleted = e(
-        state.rb,
-        "DELETE FROM ecs_cart WHERE rec_id = ? AND user_id = ?",
+        &tx,
+        "DELETE FROM ecs_cart WHERE rec_id=? AND user_id=?",
         vec![json!(rec_id), json!(auth.user_id)],
     )
     .await?;
     if deleted.rows_affected == 0 {
-        return Err(AppError::NotFound("cart item not found".to_string()));
+        return Err(AppError::NotFound("cart item not found".into()));
     }
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -246,7 +308,9 @@ pub async fn checkout_options(
 #[derive(Deserialize)]
 pub struct CheckoutQuoteRequest {
     address_id: i64,
+    #[serde(default)]
     shipping_id: i64,
+    #[serde(default)]
     payment_id: i64,
 }
 
@@ -254,8 +318,25 @@ pub struct CheckoutQuoteRequest {
 pub async fn checkout_quote(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(body): Json<CheckoutQuoteRequest>,
+    Json(mut body): Json<CheckoutQuoteRequest>,
 ) -> Result<Json<Value>, AppError> {
+    if body.shipping_id == 0 || body.payment_id == 0 {
+        if let Some(saved) = q1(
+            state.rb,
+            "SELECT shipping_id,payment_id FROM ecs_checkout_selection WHERE user_id=?",
+            vec![json!(auth.user_id)],
+        )
+        .await?
+        {
+            if body.shipping_id == 0 {
+                body.shipping_id = col_i64(&saved, "shipping_id");
+            }
+            if body.payment_id == 0 {
+                body.payment_id = col_i64(&saved, "payment_id");
+            }
+        }
+    }
+
     let rb = state.rb;
     let address = q1(
         rb,
@@ -280,7 +361,7 @@ pub async fn checkout_quote(
     .await?
     .map(|r| col_cents(&r, "pay_fee"))
     .ok_or_else(|| AppError::NotFound("payment not found or disabled".to_string()))?;
-    let rows = q(
+    let mut rows = q(
         rb,
         "SELECT c.rec_id AS rec_id, c.goods_id AS goods_id, g.goods_name AS goods_name, g.shop_price AS shop_price, c.goods_number AS goods_number
          FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
@@ -291,15 +372,18 @@ pub async fn checkout_quote(
     if rows.is_empty() {
         return Err(AppError::Validation("cart is empty".to_string()));
     }
+    super::pricing::cart(rb, auth.user_id, &mut rows).await?;
     let mut goods_amount = 0i64;
     let mut items = Vec::new();
     for row in &rows {
         let price = col_cents(row, "shop_price");
         let quantity = col_i64(row, "goods_number");
         goods_amount = goods_amount
-            .checked_add(price.checked_mul(quantity).ok_or_else(|| {
-                AppError::Validation("amount overflow".to_string())
-            })?)
+            .checked_add(
+                price
+                    .checked_mul(quantity)
+                    .ok_or_else(|| AppError::Validation("amount overflow".to_string()))?,
+            )
             .ok_or_else(|| AppError::Validation("amount overflow".to_string()))?;
         items.push(json!({
             "cart_id": col_i64(row, "rec_id"),
@@ -309,7 +393,13 @@ pub async fn checkout_quote(
             "quantity": quantity,
         }));
     }
-    let order_amount = goods_amount + shipping_fee + payment_fee;
+    let adjustment = super::flow::adjustments(rb, auth.user_id, goods_amount).await?;
+    let order_amount = goods_amount
+        .checked_add(shipping_fee)
+        .and_then(|v| v.checked_add(payment_fee))
+        .and_then(|v| v.checked_add(adjustment.extra))
+        .and_then(|v| v.checked_sub(adjustment.discount))
+        .ok_or_else(|| AppError::Validation("amount overflow".into()))?;
     Ok(Json(json!({
         "address_id": body.address_id,
         "consignee": col_str(&address, "consignee"),
@@ -321,5 +411,8 @@ pub async fn checkout_quote(
         "shipping_fee": cents_to_string(shipping_fee),
         "payment_fee": cents_to_string(payment_fee),
         "order_amount": cents_to_string(order_amount),
+        "extra_fee": cents_to_string(adjustment.extra),
+        "discount": cents_to_string(adjustment.discount),
+        "balance_requested": cents_to_string(adjustment.balance),
     })))
 }

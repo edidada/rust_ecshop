@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{col_i64, col_str, col_opt_str, col_cents, col_f64, q, q1, e};
+use crate::shared::rbutil::{col_cents, col_f64, col_i64, col_opt_str, col_str, e, q, q1};
 use crate::shared::util::{cents_to_string, PageParams};
 
 #[derive(Deserialize)]
@@ -213,7 +213,10 @@ pub async fn goods_list(
     State(state): State<AppState>,
     Query(qp): Query<GoodsListQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let page = PageParams { page: qp.page, page_size: qp.page_size };
+    let page = PageParams {
+        page: qp.page,
+        page_size: qp.page_size,
+    };
     let (page_no, page_size, offset) = page.resolve();
     let rb = state.rb;
     let mut where_clause = "WHERE is_on_sale = 1 AND is_delete = 0".to_string();
@@ -226,9 +229,13 @@ pub async fn goods_list(
         where_clause.push_str(" AND brand_id = ?");
         args.push(json!(bid));
     }
-    let keyword = qp.q.clone().or_else(|| qp.keywords.clone()).unwrap_or_default();
+    let keyword =
+        qp.q.clone()
+            .or_else(|| qp.keywords.clone())
+            .unwrap_or_default();
     if !keyword.is_empty() {
-        where_clause.push_str(" AND (goods_name LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')");
+        where_clause
+            .push_str(" AND (goods_name LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\')");
         let escaped = format!("%{}%", escape_like(&keyword));
         args.push(json!(escaped.clone()));
         args.push(json!(escaped));
@@ -252,14 +259,18 @@ pub async fn goods_list(
     args.push(json!(offset));
     let items = q(
         rb,
-        &format!("SELECT {GOODS_LIST_COLS} FROM ecs_goods {where_clause} {order_by} LIMIT ? OFFSET ?"),
+        &format!(
+            "SELECT {GOODS_LIST_COLS} FROM ecs_goods {where_clause} {order_by} LIMIT ? OFFSET ?"
+        ),
         args,
     )
     .await?
     .iter()
     .map(goods_item)
     .collect::<Vec<_>>();
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "items": items}),
+    ))
 }
 
 fn escape_like(input: &str) -> String {
@@ -304,7 +315,10 @@ pub async fn brand_goods(
     Query(qp): Query<GoodsListQuery>,
 ) -> Result<Json<Value>, AppError> {
     let brand_id = parse_id(&id)?;
-    let page = PageParams { page: qp.page, page_size: qp.page_size };
+    let page = PageParams {
+        page: qp.page,
+        page_size: qp.page_size,
+    };
     let (page_no, page_size, offset) = page.resolve();
     let rb = state.rb;
     let total_row = q1(
@@ -327,7 +341,9 @@ pub async fn brand_goods(
     .iter()
     .map(goods_item)
     .collect::<Vec<_>>();
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "items": items}),
+    ))
 }
 
 /// GET /api/v1/categories/{id}/goods
@@ -337,7 +353,10 @@ pub async fn category_goods(
     Query(qp): Query<GoodsListQuery>,
 ) -> Result<Json<Value>, AppError> {
     let category_id = parse_id(&id)?;
-    let page = PageParams { page: qp.page, page_size: qp.page_size };
+    let page = PageParams {
+        page: qp.page,
+        page_size: qp.page_size,
+    };
     let (page_no, page_size, offset) = page.resolve();
     let rb = state.rb;
     let exists = q1(
@@ -402,7 +421,9 @@ pub async fn category_goods(
     .iter()
     .map(goods_item)
     .collect::<Vec<_>>();
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "items": items}),
+    ))
 }
 
 /// GET /api/v1/compare?goods_ids=12,14
@@ -410,17 +431,23 @@ pub async fn compare(
     State(state): State<AppState>,
     Query(qp): Query<GoodsListQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let raw = qp.goods_ids.ok_or_else(|| AppError::Validation("goods_ids is required".to_string()))?;
+    let raw = qp
+        .goods_ids
+        .ok_or_else(|| AppError::Validation("goods_ids is required".to_string()))?;
     let ids: Vec<i64> = raw
         .split(',')
         .map(|s| s.trim().parse::<i64>())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| AppError::Validation("goods_ids must be integers".to_string()))?;
     if ids.len() < 2 || ids.len() > 4 {
-        return Err(AppError::Validation("goods_ids must contain 2 to 4 items".to_string()));
+        return Err(AppError::Validation(
+            "goods_ids must contain 2 to 4 items".to_string(),
+        ));
     }
     if ids.iter().any(|i| *i <= 0) {
-        return Err(AppError::Validation("goods_ids must be positive".to_string()));
+        return Err(AppError::Validation(
+            "goods_ids must be positive".to_string(),
+        ));
     }
     if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
         return Err(AppError::Validation("goods_ids must be unique".to_string()));
@@ -467,7 +494,9 @@ pub async fn price_quote(
 ) -> Result<Json<Value>, AppError> {
     let goods_id = parse_id(&id)?;
     if body.quantity < 1 || body.quantity > 999 {
-        return Err(AppError::Validation("quantity must be between 1 and 999".to_string()));
+        return Err(AppError::Validation(
+            "quantity must be between 1 and 999".to_string(),
+        ));
     }
     let rb = state.rb;
     let row = q1(
@@ -478,32 +507,27 @@ pub async fn price_quote(
     )
     .await?
     .ok_or_else(|| AppError::NotFound("goods not found".to_string()))?;
-    let mut unit_price = col_cents(&row, "shop_price");
-    let mut stock = col_i64(&row, "goods_number");
-    for attr_id in body.attribute_ids.unwrap_or_default() {
-        let attr_row = q1(
+    let attrs = body.attribute_ids.unwrap_or_default();
+    let unit_price = super::pricing::unit(
+        rb,
+        goods_id,
+        body.quantity,
+        body.product_id.unwrap_or(0),
+        &attrs,
+    )
+    .await?;
+    let stock = if let Some(pid) = body.product_id {
+        q1(
             rb,
-            "SELECT attr_price AS attr_price FROM ecs_goods_attr WHERE goods_attr_id = ? AND goods_id = ?",
-            vec![json!(attr_id), json!(goods_id)],
-        )
-        .await?
-        .ok_or_else(|| {
-            AppError::Validation(format!("attribute {attr_id} does not belong to goods {goods_id}"))
-        })?;
-        unit_price += col_cents(&attr_row, "attr_price");
-    }
-    if let Some(pid) = body.product_id {
-        let product_row = q1(
-            rb,
-            "SELECT product_number AS product_number FROM ecs_products WHERE product_id = ? AND goods_id = ?",
+            "SELECT product_number FROM ecs_products WHERE product_id=? AND goods_id=?",
             vec![json!(pid), json!(goods_id)],
         )
         .await?
-        .ok_or_else(|| {
-            AppError::Validation(format!("product {pid} does not belong to goods {goods_id}"))
-        })?;
-        stock = col_i64(&product_row, "product_number");
-    }
+        .map(|r| col_i64(&r, "product_number"))
+        .unwrap_or(0)
+    } else {
+        col_i64(&row, "goods_number")
+    };
     let stock_available = stock.max(0);
     let total = unit_price
         .checked_mul(body.quantity)
@@ -554,7 +578,9 @@ pub async fn goods_gallery(
     if images.is_empty() {
         return Err(AppError::NotFound("goods gallery is empty".to_string()));
     }
-    Ok(Json(json!({"goods_id": goods_id, "name": goods_name, "images": images})))
+    Ok(Json(
+        json!({"goods_id": goods_id, "name": goods_name, "images": images}),
+    ))
 }
 
 /// GET /api/v1/goods/{id}/comments (public list)

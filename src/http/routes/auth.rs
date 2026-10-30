@@ -6,7 +6,7 @@ use crate::http::auth::{insert_session_tx, revoke_user_sessions, AuthUser};
 use crate::http::state::AppState;
 use crate::infrastructure::crypto;
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{col_i64, col_str, col_opt_str, e, insert_id, q1};
+use crate::shared::rbutil::{col_i64, col_opt_str, col_str, e, insert_id, q1};
 
 /// Insert a transactional email outbox row.
 pub async fn insert_outbox<E: Executor>(
@@ -33,7 +33,9 @@ pub async fn insert_outbox<E: Executor>(
 fn validate_password(password: &str) -> Result<(), AppError> {
     let len = password.len();
     if !(8..=1024).contains(&len) {
-        return Err(AppError::Validation("password must be 8-1024 bytes".to_string()));
+        return Err(AppError::Validation(
+            "password must be 8-1024 bytes".to_string(),
+        ));
     }
     Ok(())
 }
@@ -52,7 +54,9 @@ pub async fn username_availability(
     Json(body): Json<AvailabilityRequest>,
 ) -> Result<Json<Value>, AppError> {
     if body.username.is_empty() || body.username.len() > 60 {
-        return Err(AppError::Validation("username must be 1-60 bytes".to_string()));
+        return Err(AppError::Validation(
+            "username must be 1-60 bytes".to_string(),
+        ));
     }
     let row = q1(
         state.rb,
@@ -70,7 +74,9 @@ pub async fn email_availability(
     Json(body): Json<AvailabilityRequest>,
 ) -> Result<Json<Value>, AppError> {
     if body.email.is_empty() || body.email.len() > 120 {
-        return Err(AppError::Validation("email must be 1-120 bytes".to_string()));
+        return Err(AppError::Validation(
+            "email must be 1-120 bytes".to_string(),
+        ));
     }
     let row = q1(
         state.rb,
@@ -97,13 +103,19 @@ pub async fn register(
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if !body.agreement_accepted {
-        return Err(AppError::Validation("agreement must be accepted".to_string()));
+        return Err(AppError::Validation(
+            "agreement must be accepted".to_string(),
+        ));
     }
     if body.username.is_empty() || body.username.len() > 60 {
-        return Err(AppError::Validation("username must be 1-60 bytes".to_string()));
+        return Err(AppError::Validation(
+            "username must be 1-60 bytes".to_string(),
+        ));
     }
     if body.email.is_empty() || body.email.len() > 120 {
-        return Err(AppError::Validation("email must be 1-120 bytes".to_string()));
+        return Err(AppError::Validation(
+            "email must be 1-120 bytes".to_string(),
+        ));
     }
     validate_password(&body.password)?;
     let password_hash = crypto::hash_password(&body.password);
@@ -116,12 +128,18 @@ pub async fn register(
     )
     .await?;
     if col_i64(&conflict.unwrap_or_default(), "cnt") > 0 {
-        return Err(AppError::Conflict("username or email already registered".to_string()));
+        return Err(AppError::Conflict(
+            "username or email already registered".to_string(),
+        ));
     }
     let result = e(
         &tx,
         "INSERT INTO ecs_users (user_name, email, password_hash) VALUES (?, ?, ?)",
-        vec![json!(body.username), json!(body.email), json!(password_hash)],
+        vec![
+            json!(body.username),
+            json!(body.email),
+            json!(password_hash),
+        ],
     )
     .await?;
     let user_id = insert_id(&result);
@@ -165,7 +183,9 @@ pub async fn login(
     let token_hash = crypto::sha256_hex(token.as_bytes());
     insert_session_tx(&tx, &token_hash, user_id).await?;
     tx.commit().await?;
-    Ok(Json(json!({"user_id": user_id, "username": body.username, "access_token": token})))
+    Ok(Json(
+        json!({"user_id": user_id, "username": body.username, "access_token": token}),
+    ))
 }
 
 /// POST /api/v1/auth/logout — invalidates the current session.
@@ -186,10 +206,7 @@ pub async fn logout(
 }
 
 /// GET /api/v1/me
-pub async fn me(
-    State(state): State<AppState>,
-    auth: AuthUser,
-) -> Result<Json<Value>, AppError> {
+pub async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<Value>, AppError> {
     let row = q1(
         state.rb,
         "SELECT user_id AS user_id, user_name AS user_name, email AS email, mobile_phone AS mobile_phone, is_validated AS is_validated
@@ -223,7 +240,9 @@ pub async fn me_patch(
 ) -> Result<StatusCode, AppError> {
     if let Some(email) = &body.email {
         if email.is_empty() || email.len() > 120 {
-            return Err(AppError::Validation("email must be 1-120 bytes".to_string()));
+            return Err(AppError::Validation(
+                "email must be 1-120 bytes".to_string(),
+            ));
         }
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
@@ -239,8 +258,22 @@ pub async fn me_patch(
         }
         e(
             &tx,
-            "UPDATE ecs_users SET email = ? WHERE user_id = ?",
+            "UPDATE ecs_users SET email = ?, is_validated = 0 WHERE user_id = ?",
             vec![json!(email), json!(auth.user_id)],
+        )
+        .await?;
+    }
+    if body.email.is_some() {
+        e(
+            &tx,
+            "DELETE FROM ecs_email_verification_tokens WHERE user_id = ?",
+            vec![json!(auth.user_id)],
+        )
+        .await?;
+        e(
+            &tx,
+            "DELETE FROM ecs_email_verified_users WHERE user_id = ?",
+            vec![json!(auth.user_id)],
         )
         .await?;
     }
@@ -290,7 +323,9 @@ pub async fn me_password_patch(
     )
     .await?;
     if updated.rows_affected != 1 {
-        return Err(AppError::Conflict("password changed concurrently".to_string()));
+        return Err(AppError::Conflict(
+            "password changed concurrently".to_string(),
+        ));
     }
     revoke_user_sessions(&tx, auth.user_id).await?;
     tx.commit().await?;

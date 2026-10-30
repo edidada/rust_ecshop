@@ -17,15 +17,21 @@ pub async fn payment_callback(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    if provider == "mock" {
+        super::mock::enabled()?;
+    }
+    if provider.len() > 60 {
+        return Err(AppError::Validation("provider too long".into()));
+    }
     let signature = headers
         .get("X-Payment-Signature")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let expected = crate::infrastructure::crypto::hmac_sha256_hex(
+    if !crate::infrastructure::crypto::verify_hmac_sha256_hex(
         &state.config.payment_callback_secret,
         &body,
-    );
-    if signature != expected {
+        signature,
+    ) {
         return Err(AppError::Unauthenticated);
     }
     let payload: Value = serde_json::from_slice(&body)
@@ -65,10 +71,6 @@ pub async fn payment_callback(
     let order_id = col_i64(&order, "order_id");
     let order_status = col_str(&order, "order_status");
     let order_amount_cents = col_cents(&order, "order_amount");
-    // Amount must equal the order's due amount.
-    if amount_cents != order_amount_cents {
-        return Err(AppError::Conflict("callback amount does not match order".to_string()));
-    }
     // Unique (provider, provider_trade_no): replays of the same transaction return 200.
     let existing = q1(
         &tx,
@@ -81,29 +83,32 @@ pub async fn payment_callback(
         if existing_order == order_id {
             return Ok(Json(json!({"status": "ok", "replayed": true})));
         }
-        return Err(AppError::Conflict("provider trade number conflicts".to_string()));
+        return Err(AppError::Conflict(
+            "provider trade number conflicts".to_string(),
+        ));
     }
     if order_status == "paid" {
-        // Already paid but no pay_log (e.g. paid by balance): record and ack.
-        e(
-            &tx,
-            "INSERT INTO ecs_pay_log (order_id, provider, provider_trade_no, amount, status, raw_payload, received_at)
-             VALUES (?, ?, ?, ?, 'paid', ?, ?)",
-            vec![
-                json!(order_id),
-                json!(provider),
-                json!(provider_trade_no),
-                json!(amount_cents as f64 / 100.0),
-                json!(raw),
-                json!(now),
-            ],
-        )
-        .await?;
-        tx.commit().await?;
-        return Ok(Json(json!({"status": "ok", "replayed": true})));
+        return Err(AppError::Conflict(
+            "order already paid; reconcile duplicate collection".into(),
+        ));
+    }
+    let balance_paid = q1(
+        &tx,
+        "SELECT paid_cents AS paid_cents FROM ecs_order_balance_payment WHERE order_id = ?",
+        vec![json!(order_id)],
+    )
+    .await?
+    .map(|r| col_i64(&r, "paid_cents"))
+    .unwrap_or(0);
+    if amount_cents <= 0 || amount_cents != order_amount_cents - balance_paid {
+        return Err(AppError::Conflict(
+            "callback amount does not match remaining due".into(),
+        ));
     }
     if order_status != "pending_payment" {
-        return Err(AppError::Conflict("order is not pending payment".to_string()));
+        return Err(AppError::Conflict(
+            "order is not pending payment".to_string(),
+        ));
     }
     e(
         &tx,
@@ -126,7 +131,9 @@ pub async fn payment_callback(
     )
     .await?;
     if updated.rows_affected != 1 {
-        return Err(AppError::Conflict("order status changed concurrently".to_string()));
+        return Err(AppError::Conflict(
+            "order status changed concurrently".to_string(),
+        ));
     }
     tx.commit().await?;
     Ok(Json(json!({
@@ -135,4 +142,13 @@ pub async fn payment_callback(
         "order_id": order_id,
         "order_amount": cents_to_string(order_amount_cents),
     })))
+}
+
+/// Legacy gateway entry points use the documented signed JSON adapter contract.
+pub async fn legacy_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    payment_callback(State(state), Path("legacy".into()), headers, body).await
 }

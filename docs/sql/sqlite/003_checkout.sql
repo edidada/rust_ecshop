@@ -1,0 +1,23 @@
+-- Persistent checkout selections; money remains server-calculated.
+CREATE TABLE IF NOT EXISTS ecs_checkout_selection (
+ user_id INTEGER PRIMARY KEY, shipping_id INTEGER NOT NULL DEFAULT 0, payment_id INTEGER NOT NULL DEFAULT 0,
+ surplus_cents INTEGER NOT NULL DEFAULT 0, integral INTEGER NOT NULL DEFAULT 0, bonus_id INTEGER NOT NULL DEFAULT 0,
+ pack_id INTEGER NOT NULL DEFAULT 0, card_id INTEGER NOT NULL DEFAULT 0, insure INTEGER NOT NULL DEFAULT 0,
+ need_invoice INTEGER NOT NULL DEFAULT 0, invoice_title TEXT NOT NULL DEFAULT '', invoice_content TEXT NOT NULL DEFAULT '',
+ oos_policy TEXT NOT NULL DEFAULT 'cancel', FOREIGN KEY(user_id) REFERENCES ecs_users(user_id));
+CREATE TABLE IF NOT EXISTS ecs_pack (pack_id INTEGER PRIMARY KEY, pack_name TEXT NOT NULL, pack_fee DECIMAL(12,2) NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS ecs_card (card_id INTEGER PRIMARY KEY, card_name TEXT NOT NULL, card_fee DECIMAL(12,2) NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS ecs_redemption (
+ redemption_id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,goods_id INTEGER NOT NULL,quantity INTEGER NOT NULL,points INTEGER NOT NULL,
+ idempotency_key VARCHAR(100) NOT NULL,created_at INTEGER NOT NULL,UNIQUE(user_id,idempotency_key));
+CREATE TABLE IF NOT EXISTS ecs_promotion_bid (
+ bid_id INTEGER PRIMARY KEY AUTOINCREMENT,promotion_id INTEGER NOT NULL,user_id INTEGER NOT NULL,price_cents INTEGER NOT NULL,
+ deposit_cents INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ecs_promotion_version (promotion_id INTEGER PRIMARY KEY,version INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS ecs_checkout_audit (order_id INTEGER PRIMARY KEY,selection TEXT NOT NULL,discount_cents INTEGER NOT NULL DEFAULT 0);
+INSERT OR IGNORE INTO ecs_pack VALUES(1,'标准包装',2.00);
+INSERT OR IGNORE INTO ecs_card VALUES(1,'祝福贺卡',1.00);
+CREATE TABLE IF NOT EXISTS ecs_cart_offer (user_id INTEGER PRIMARY KEY,package_id INTEGER NOT NULL DEFAULT 0,favourable_id INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS ecs_cart_spec(user_id INTEGER NOT NULL,goods_id INTEGER NOT NULL,product_id INTEGER NOT NULL DEFAULT 0,attributes TEXT NOT NULL DEFAULT '[]',PRIMARY KEY(user_id,goods_id));
+CREATE TABLE IF NOT EXISTS ecs_order_spec(order_id INTEGER NOT NULL,goods_id INTEGER NOT NULL,product_id INTEGER NOT NULL DEFAULT 0,attributes TEXT NOT NULL DEFAULT '[]',PRIMARY KEY(order_id,goods_id));
+CREATE TABLE IF NOT EXISTS ecs_promotion_claim(promotion_id INTEGER PRIMARY KEY,order_id INTEGER NOT NULL,user_id INTEGER NOT NULL);

@@ -34,3 +34,17 @@ jobs:
         run: cargo build
       - name: Test
         run: cargo test --all-targets
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: HTTP and mock integration acceptance
+        run: python scripts/http_acceptance.py
+      - name: Upload HTTP evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: http-evidence-${{ matrix.os }}
+          path: |
+            target/http-server.log
+            target/http-results.json

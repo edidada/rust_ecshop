@@ -21,8 +21,11 @@ pub async fn run(state: AppState) -> Result<(), AppError> {
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
     tracing::info!("listening on http://{addr}");
-    axum::serve(listener, build_router(state))
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+    axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?;
     Ok(())
 }

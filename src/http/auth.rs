@@ -3,14 +3,17 @@ use rbatis::rbatis::RBatis;
 use serde_json::json;
 
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{q1};
+use crate::shared::rbutil::q1;
 
 /// Look up a session token hash. Split out so it is unit-testable.
-pub async fn find_session_user(rb: &RBatis, token_hash: &str) -> Result<Option<(i64, String)>, AppError> {
+pub async fn find_session_user(
+    rb: &RBatis,
+    token_hash: &str,
+) -> Result<Option<(i64, String)>, AppError> {
     let row = q1(
         rb,
-        "SELECT u.user_id AS user_id, u.user_name AS user_name FROM ecs_sessions s JOIN ecs_users u ON u.user_id = s.user_id WHERE s.token_hash = ?",
-        vec![json!(token_hash)],
+        "SELECT u.user_id AS user_id, u.user_name AS user_name FROM ecs_sessions s JOIN ecs_users u ON u.user_id = s.user_id WHERE s.token_hash = ? AND s.created_at > ?",
+        vec![json!(token_hash), json!(crate::shared::util::unix_now() - 86400)],
     )
     .await?;
     Ok(row.map(|row| {
@@ -22,7 +25,11 @@ pub async fn find_session_user(rb: &RBatis, token_hash: &str) -> Result<Option<(
 }
 
 /// Insert a session row for a user inside an existing transaction executor.
-pub async fn insert_session_tx<E: Executor>(tx: &E, token_hash: &str, user_id: i64) -> Result<(), AppError> {
+pub async fn insert_session_tx<E: Executor>(
+    tx: &E,
+    token_hash: &str,
+    user_id: i64,
+) -> Result<(), AppError> {
     crate::shared::rbutil::e(
         tx,
         "INSERT INTO ecs_sessions (token_hash, user_id) VALUES (?, ?)",
@@ -45,7 +52,10 @@ pub async fn revoke_user_sessions<E: Executor>(tx: &E, user_id: i64) -> Result<(
 
 /// Parse the Bearer token from the Authorization header.
 pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
     let token = value.strip_prefix("Bearer ")?.trim();
     if token.is_empty() {
         None
@@ -61,7 +71,10 @@ pub struct AuthUser {
     pub user_name: String,
 }
 
-pub async fn authenticate(rb: &RBatis, headers: &axum::http::HeaderMap) -> Result<AuthUser, AppError> {
+pub async fn authenticate(
+    rb: &RBatis,
+    headers: &axum::http::HeaderMap,
+) -> Result<AuthUser, AppError> {
     let token = extract_bearer_token(headers).ok_or(AppError::Unauthenticated)?;
     let token_hash = crate::infrastructure::crypto::sha256_hex(token.as_bytes());
     find_session_user(rb, &token_hash)
@@ -74,7 +87,10 @@ pub async fn authenticate(rb: &RBatis, headers: &axum::http::HeaderMap) -> Resul
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         authenticate(state.rb, &parts.headers).await
     }
 }
@@ -146,7 +162,9 @@ mod tests {
         .unwrap();
         {
             let tx = db::begin(rb).await.unwrap();
-            insert_session_tx(&tx, "rollback-check-hash", 992).await.unwrap();
+            insert_session_tx(&tx, "rollback-check-hash", 992)
+                .await
+                .unwrap();
             // Explicit rollback: uncommitted changes must stay invisible.
             tx.rollback().await.unwrap();
         }
@@ -158,11 +176,20 @@ mod tests {
     fn bearer_token_extraction_follows_contract() {
         let mut headers = axum::http::HeaderMap::new();
         assert_eq!(extract_bearer_token(&headers), None);
-        headers.insert(axum::http::header::AUTHORIZATION, "Basic abc".parse().unwrap());
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic abc".parse().unwrap(),
+        );
         assert_eq!(extract_bearer_token(&headers), None);
-        headers.insert(axum::http::header::AUTHORIZATION, "Bearer ".parse().unwrap());
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer ".parse().unwrap(),
+        );
         assert_eq!(extract_bearer_token(&headers), None);
-        headers.insert(axum::http::header::AUTHORIZATION, "Bearer tok-1".parse().unwrap());
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer tok-1".parse().unwrap(),
+        );
         assert_eq!(extract_bearer_token(&headers), Some("tok-1".to_string()));
     }
 }

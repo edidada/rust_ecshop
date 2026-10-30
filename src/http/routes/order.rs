@@ -10,15 +10,15 @@ use serde_json::{json, Value};
 use crate::http::auth::AuthUser;
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{
-    col_i64, col_str, col_cents, col_f64, e, insert_id, q, q1,
-};
+use crate::shared::rbutil::{col_cents, col_f64, col_i64, col_str, e, insert_id, q, q1};
 use crate::shared::util::{cents_to_string, parse_money_cents, unix_now, PageParams};
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
         Ok(v) if v > 0 => Ok(v),
-        _ => Err(AppError::Validation("id must be a positive integer".to_string())),
+        _ => Err(AppError::Validation(
+            "id must be a positive integer".to_string(),
+        )),
     }
 }
 
@@ -46,7 +46,9 @@ async fn fetch_order_summary_tx<E: rbatis::executor::Executor>(
 ) -> Result<Value, AppError> {
     q1(
         tx,
-        &format!("SELECT {ORDER_SUMMARY_COLS} FROM ecs_order_info WHERE order_id = ? AND user_id = ?"),
+        &format!(
+            "SELECT {ORDER_SUMMARY_COLS} FROM ecs_order_info WHERE order_id = ? AND user_id = ?"
+        ),
         vec![json!(order_id), json!(user_id)],
     )
     .await?
@@ -63,7 +65,9 @@ fn gen_order_sn() -> String {
 #[derive(Deserialize, serde::Serialize)]
 pub struct OrderCreateRequest {
     address_id: i64,
+    #[serde(default)]
     shipping_id: i64,
+    #[serde(default)]
     payment_id: i64,
     #[serde(default)]
     remark: String,
@@ -75,8 +79,25 @@ pub async fn order_create(
     State(state): State<AppState>,
     auth: AuthUser,
     headers: HeaderMap,
-    Json(body): Json<OrderCreateRequest>,
+    Json(mut body): Json<OrderCreateRequest>,
 ) -> Result<axum::response::Response, AppError> {
+    if body.shipping_id == 0 || body.payment_id == 0 {
+        if let Some(saved) = q1(
+            state.rb,
+            "SELECT shipping_id,payment_id FROM ecs_checkout_selection WHERE user_id=?",
+            vec![json!(auth.user_id)],
+        )
+        .await?
+        {
+            if body.shipping_id == 0 {
+                body.shipping_id = col_i64(&saved, "shipping_id");
+            }
+            if body.payment_id == 0 {
+                body.payment_id = col_i64(&saved, "payment_id");
+            }
+        }
+    }
+
     let idempotency_key = headers
         .get("Idempotency-Key")
         .and_then(|v| v.to_str().ok())
@@ -99,11 +120,14 @@ pub async fn order_create(
     .await?;
     if let Some(existing) = existing {
         if col_str(&existing, "request_fingerprint") == fingerprint {
-            let mut v = fetch_order_summary_tx(&tx, col_i64(&existing, "order_id"), user_id).await?;
+            let mut v =
+                fetch_order_summary_tx(&tx, col_i64(&existing, "order_id"), user_id).await?;
             v["replayed"] = json!(true);
             return Ok((StatusCode::OK, Json(v)).into_response());
         }
-        return Err(AppError::Conflict("idempotency key reused with different body".to_string()));
+        return Err(AppError::Conflict(
+            "idempotency key reused with different body".to_string(),
+        ));
     }
     // Address must belong to the user.
     let address = q1(
@@ -131,9 +155,9 @@ pub async fn order_create(
     .map(|r| col_cents(&r, "pay_fee"))
     .ok_or_else(|| AppError::NotFound("payment not found or disabled".to_string()))?;
     // Re-read cart inside the transaction.
-    let cart_rows = q(
+    let mut cart_rows = q(
         &tx,
-        "SELECT c.goods_id AS goods_id, c.goods_number AS goods_number, g.goods_name AS goods_name, g.shop_price AS shop_price
+        "SELECT c.goods_id AS goods_id, c.goods_number AS goods_number, g.goods_name AS goods_name, g.shop_price AS shop_price, g.is_on_sale AS is_on_sale, g.is_delete AS is_delete
          FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
          WHERE c.user_id = ? ORDER BY c.goods_id",
         vec![json!(user_id)],
@@ -142,18 +166,31 @@ pub async fn order_create(
     if cart_rows.is_empty() {
         return Err(AppError::Validation("cart is empty".to_string()));
     }
+    super::pricing::cart(&tx, user_id, &mut cart_rows).await?;
     // Conditional stock deduction: UPDATE ... WHERE stock >= quantity.
     for row in &cart_rows {
+        if col_i64(row, "is_on_sale") != 1 || col_i64(row, "is_delete") != 0 {
+            return Err(AppError::Conflict("cart contains unavailable goods".into()));
+        }
         let goods_id = col_i64(row, "goods_id");
         let quantity = col_i64(row, "goods_number");
+        let product = col_i64(row, "product_id");
+        if product > 0 {
+            let r=e(&tx,"UPDATE ecs_products SET product_number=product_number-? WHERE product_id=? AND goods_id=? AND product_number>=?",vec![json!(quantity),json!(product),json!(goods_id),json!(quantity)]).await?;
+            if r.rows_affected != 1 {
+                return Err(AppError::Conflict("insufficient SKU stock".into()));
+            }
+        }
         let updated = e(
             &tx,
-            "UPDATE ecs_goods SET goods_number = goods_number - ? WHERE goods_id = ? AND goods_number >= ?",
+            "UPDATE ecs_goods SET goods_number = goods_number - ? WHERE goods_id = ? AND goods_number >= ? AND is_on_sale = 1 AND is_delete = 0",
             vec![json!(quantity), json!(goods_id), json!(quantity)],
         )
         .await?;
         if updated.rows_affected != 1 {
-            return Err(AppError::Conflict("insufficient stock or unavailable goods".to_string()));
+            return Err(AppError::Conflict(
+                "insufficient stock or unavailable goods".to_string(),
+            ));
         }
     }
     let goods_amount: i64 = cart_rows
@@ -164,7 +201,14 @@ pub async fn order_create(
             acc.checked_add(price.checked_mul(qty)?)
         })
         .ok_or_else(|| AppError::Validation("amount overflow".to_string()))?;
-    let order_amount = goods_amount + shipping_fee + payment_fee;
+    let adjustment = super::flow::adjustments(&tx, user_id, goods_amount).await?;
+    let order_amount = goods_amount
+        .checked_add(shipping_fee)
+        .and_then(|v| v.checked_add(payment_fee))
+        .and_then(|v| v.checked_add(adjustment.extra))
+        .and_then(|v| v.checked_sub(adjustment.discount))
+        .filter(|v| *v >= 0)
+        .ok_or_else(|| AppError::Validation("amount overflow".into()))?;
     let order_sn = gen_order_sn();
     let result = e(
         &tx,
@@ -190,7 +234,19 @@ pub async fn order_create(
     )
     .await?;
     let order_id = insert_id(&result);
+    super::flow::apply(&tx, user_id, order_id, order_amount, &adjustment).await?;
     for row in &cart_rows {
+        e(
+            &tx,
+            "INSERT INTO ecs_order_spec(order_id,goods_id,product_id,attributes) VALUES(?,?,?,?)",
+            vec![
+                json!(order_id),
+                json!(col_i64(row, "goods_id")),
+                json!(col_i64(row, "product_id")),
+                json!(row["attributes"].to_string()),
+            ],
+        )
+        .await?;
         e(
             &tx,
             "INSERT INTO ecs_order_goods (order_id, goods_id, goods_name, goods_number, goods_price)
@@ -215,6 +271,12 @@ pub async fn order_create(
         &tx,
         "INSERT INTO ecs_order_action (order_id, actor_user_id, action, note, created_at) VALUES (?, ?, 'create', '', ?)",
         vec![json!(order_id), json!(user_id), json!(unix_now())],
+    )
+    .await?;
+    e(
+        &tx,
+        "DELETE FROM ecs_cart_spec WHERE user_id=?",
+        vec![json!(user_id)],
     )
     .await?;
     let mut v = fetch_order_summary_tx(&tx, order_id, user_id).await?;
@@ -250,7 +312,9 @@ pub async fn order_list(
     .iter()
     .map(order_summary)
     .collect::<Vec<_>>();
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "items": items}),
+    ))
 }
 
 /// GET /api/v1/me/orders/{id}
@@ -263,7 +327,9 @@ pub async fn order_detail(
     let rb = state.rb;
     let mut summary = q1(
         rb,
-        &format!("SELECT {ORDER_SUMMARY_COLS} FROM ecs_order_info WHERE order_id = ? AND user_id = ?"),
+        &format!(
+            "SELECT {ORDER_SUMMARY_COLS} FROM ecs_order_info WHERE order_id = ? AND user_id = ?"
+        ),
         vec![json!(order_id), json!(auth.user_id)],
     )
     .await?
@@ -337,7 +403,47 @@ pub async fn order_cancel(
         e(
             &tx,
             "UPDATE ecs_goods SET goods_number = goods_number + ? WHERE goods_id = ?",
-            vec![json!(col_i64(row, "goods_number")), json!(col_i64(row, "goods_id"))],
+            vec![
+                json!(col_i64(row, "goods_number")),
+                json!(col_i64(row, "goods_id")),
+            ],
+        )
+        .await?;
+    }
+    if let Some(audit) = q1(
+        &tx,
+        "SELECT selection AS selection FROM ecs_checkout_audit WHERE order_id=?",
+        vec![json!(order_id)],
+    )
+    .await?
+    {
+        let selected: Value =
+            serde_json::from_str(&col_str(&audit, "selection")).unwrap_or(Value::Null);
+        let points = col_i64(&selected, "integral");
+        if points > 0 {
+            e(
+                &tx,
+                "UPDATE ecs_users SET pay_points=pay_points+? WHERE user_id=?",
+                vec![json!(points), json!(auth.user_id)],
+            )
+            .await?;
+        }
+        e(
+            &tx,
+            "UPDATE ecs_user_bonus SET used_time=0,order_id=0 WHERE order_id=? AND user_id=?",
+            vec![json!(order_id), json!(auth.user_id)],
+        )
+        .await?;
+    }
+    let specs=q(&tx,"SELECT s.product_id AS product_id,g.goods_number AS quantity FROM ecs_order_spec s JOIN ecs_order_goods g ON g.order_id=s.order_id AND g.goods_id=s.goods_id WHERE s.order_id=? AND s.product_id>0",vec![json!(order_id)]).await?;
+    for spec in specs {
+        e(
+            &tx,
+            "UPDATE ecs_products SET product_number=product_number+? WHERE product_id=?",
+            vec![
+                json!(col_i64(&spec, "quantity")),
+                json!(col_i64(&spec, "product_id")),
+            ],
         )
         .await?;
     }
@@ -386,12 +492,12 @@ pub async fn order_received(
     let tx = crate::infrastructure::db::begin(state.rb).await?;
     let updated = e(
         &tx,
-        "UPDATE ecs_order_info SET order_status = 'received' WHERE order_id = ? AND user_id = ? AND order_status = 'paid'",
+        "UPDATE ecs_order_info SET order_status = 'received' WHERE order_id = ? AND user_id = ? AND order_status = 'shipped'",
         vec![json!(order_id), json!(auth.user_id)],
     )
     .await?;
     if updated.rows_affected == 0 {
-        return Err(AppError::Conflict("order is not paid".to_string()));
+        return Err(AppError::Conflict("order is not shipped".to_string()));
     }
     e(
         &tx,
@@ -458,7 +564,9 @@ pub async fn order_return_to_cart(
         added += addable;
     }
     if added == 0 {
-        return Err(AppError::Conflict("no sellable goods to return to cart".to_string()));
+        return Err(AppError::Conflict(
+            "no sellable goods to return to cart".to_string(),
+        ));
     }
     tx.commit().await?;
     Ok(Json(json!({"returned_quantity": added})))
@@ -477,7 +585,9 @@ pub async fn order_merge(
     Json(body): Json<OrderMergeRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if body.from_order_id == body.to_order_id {
-        return Err(AppError::Validation("from and to orders must differ".to_string()));
+        return Err(AppError::Validation(
+            "from and to orders must differ".to_string(),
+        ));
     }
     let rb = state.rb;
     let user_id = auth.user_id;
@@ -510,7 +620,9 @@ pub async fn order_merge(
     .map(|r| col_i64(&r, "cnt"))
     .unwrap_or(0);
     if balance_used > 0 {
-        return Err(AppError::Conflict("orders using account balance cannot be merged".to_string()));
+        return Err(AppError::Conflict(
+            "orders using account balance cannot be merged".to_string(),
+        ));
     }
     let goods_amount = col_cents(&from, "goods_amount") + col_cents(&to, "goods_amount");
     let shipping_fee = col_cents(&from, "shipping_fee") + col_cents(&to, "shipping_fee");
@@ -649,13 +761,13 @@ pub async fn order_surplus(
     let tx = crate::infrastructure::db::begin(state.rb).await?;
     let order = q1(
         &tx,
-        "SELECT goods_amount AS goods_amount, shipping_fee AS shipping_fee
+        "SELECT order_amount AS order_amount
          FROM ecs_order_info WHERE order_id = ? AND user_id = ? AND order_status = 'pending_payment'",
         vec![json!(order_id), json!(auth.user_id)],
     )
     .await?
     .ok_or_else(|| AppError::NotFound("pending order not found".to_string()))?;
-    let total_due = col_cents(&order, "goods_amount") + col_cents(&order, "shipping_fee");
+    let total_due = col_cents(&order, "order_amount");
     let already_paid = q1(
         &tx,
         "SELECT paid_cents AS paid_cents FROM ecs_order_balance_payment WHERE order_id = ? AND user_id = ?",
@@ -666,7 +778,9 @@ pub async fn order_surplus(
     .unwrap_or(0);
     let remaining = total_due - already_paid;
     if remaining <= 0 {
-        return Err(AppError::Conflict("order already fully paid by balance".to_string()));
+        return Err(AppError::Conflict(
+            "order already fully paid by balance".to_string(),
+        ));
     }
     let apply = cents.min(remaining);
     let deducted = e(
@@ -761,12 +875,13 @@ pub async fn order_payment_patch(
     let new_amount = remaining + new_fee;
     e(
         &tx,
-        "UPDATE ecs_order_info SET pay_id = ?, payment_fee = ?, order_amount = ? WHERE order_id = ?",
+        "UPDATE ecs_order_info SET pay_id = ?, payment_fee = ?, order_amount = ? WHERE order_id = ? AND user_id = ? AND order_status = 'pending_payment'",
         vec![
             json!(body.payment_id),
             json!(new_fee as f64 / 100.0),
             json!(new_amount as f64 / 100.0),
             json!(order_id),
+            json!(auth.user_id),
         ],
     )
     .await?;
@@ -813,7 +928,9 @@ pub async fn order_address_patch(
 ) -> Result<StatusCode, AppError> {
     let order_id = parse_id(&id)?;
     if body.consignee.is_empty() || body.address.is_empty() {
-        return Err(AppError::Validation("consignee and address are required".to_string()));
+        return Err(AppError::Validation(
+            "consignee and address are required".to_string(),
+        ));
     }
     if !body.email.contains('@') {
         return Err(AppError::Validation("email must be valid".to_string()));
@@ -888,11 +1005,7 @@ pub async fn me_group_buy_detail(
         .map(Json)
 }
 
-async fn group_buy_items(
-    rb: &RBatis,
-    user_id: i64,
-    only: Option<i64>,
-) -> Result<Value, AppError> {
+async fn group_buy_items(rb: &RBatis, user_id: i64, only: Option<i64>) -> Result<Value, AppError> {
     let items = q(
         rb,
         "SELECT p.promotion_id AS promotion_id, p.order_id AS order_id, a.act_name AS act_name, a.goods_name AS goods_name,

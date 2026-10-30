@@ -1,14 +1,18 @@
 pub mod account;
 pub mod auth;
 pub mod cart;
-pub mod compat;
 pub mod community;
+pub mod compat;
 pub mod content;
+pub mod flow;
 pub mod goods;
 pub mod health;
 pub mod marketing;
+pub mod marketing_write;
+pub mod mock;
 pub mod order;
 pub mod payment;
+pub mod pricing;
 pub mod widgets;
 
 use axum::Router;
@@ -45,27 +49,45 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/promotions/:id", get(marketing::promotion_detail))
         .route("/api/v1/topics/:id", get(marketing::topic_detail))
         .route("/api/v1/votes/current", get(marketing::votes_current))
-        .route(
-            "/api/v1/votes/:id/responses",
-            post(marketing::vote_respond),
-        )
+        .route("/api/v1/votes/:id/responses", post(marketing::vote_respond))
         .route("/api/v1/exchange-goods", get(marketing::exchange_goods))
         .route(
             "/api/v1/exchange-goods/:id",
             get(marketing::exchange_goods_detail),
         )
+        .route(
+            "/api/v1/exchange-goods/:id/redemptions",
+            post(marketing_write::redeem),
+        )
+        .route("/api/v1/promotions/:id/bids", post(marketing_write::bid))
+        .route(
+            "/api/v1/promotions/:id/orders",
+            post(marketing_write::group_buy),
+        )
         // community context
-        .route("/api/v1/messages", get(community::messages_list).post(community::messages_create))
+        .route(
+            "/api/v1/messages",
+            get(community::messages_list).post(community::messages_create),
+        )
         .route("/api/v1/me/messages", get(community::me_messages))
-        .route("/api/v1/me/messages/:id", delete(community::me_message_delete))
+        .route(
+            "/api/v1/me/messages/:id",
+            delete(community::me_message_delete),
+        )
         .route(
             "/api/v1/goods/:id/comments",
             get(goods::goods_comments).post(community::goods_comment_create),
         )
         .route("/api/v1/me/comments", get(community::me_comments))
-        .route("/api/v1/me/comments/:id", delete(community::me_comment_delete))
+        .route(
+            "/api/v1/me/comments/:id",
+            delete(community::me_comment_delete),
+        )
         .route("/api/v1/tags", get(community::tags_cloud))
-        .route("/api/v1/me/tags", get(community::me_tags).delete(community::me_tag_delete))
+        .route(
+            "/api/v1/me/tags",
+            get(community::me_tags).delete(community::me_tag_delete),
+        )
         .route("/api/v1/goods/:id/tags", post(community::goods_tag_create))
         // widgets and XML documents (top-level paths)
         .route("/api/v1/ads/:id", get(widgets::ad_detail))
@@ -75,61 +97,171 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/sitemap.xml", get(widgets::sitemap))
         .route("/feed.xml", get(widgets::feed))
         // auth context
-        .route("/api/v1/auth/availability/username", post(auth::username_availability))
-        .route("/api/v1/auth/availability/email", post(auth::email_availability))
+        .route(
+            "/api/v1/auth/availability/username",
+            post(auth::username_availability),
+        )
+        .route(
+            "/api/v1/auth/availability/email",
+            post(auth::email_availability),
+        )
         .route("/api/v1/auth/register", post(auth::register))
         .route("/api/v1/auth/login", post(auth::login))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/me", get(auth::me).patch(auth::me_patch))
         .route("/api/v1/me/password", patch(auth::me_password_patch))
         // account asset context
-        .route("/api/v1/me/addresses", get(account::address_list).post(account::address_create))
-        .route("/api/v1/me/addresses/:id", patch(account::address_update).delete(account::address_delete))
-        .route("/api/v1/me/favorites", get(account::favorite_list).post(account::favorite_create))
-        .route("/api/v1/me/favorites/:id", patch(account::favorite_update).delete(account::favorite_delete))
-        .route("/api/v1/me/bookings", get(account::booking_list).post(account::booking_create))
+        .route(
+            "/api/v1/me/addresses",
+            get(account::address_list).post(account::address_create),
+        )
+        .route(
+            "/api/v1/me/addresses/:id",
+            patch(account::address_update).delete(account::address_delete),
+        )
+        .route(
+            "/api/v1/me/favorites",
+            get(account::favorite_list).post(account::favorite_create),
+        )
+        .route(
+            "/api/v1/me/favorites/:id",
+            patch(account::favorite_update).delete(account::favorite_delete),
+        )
+        .route(
+            "/api/v1/me/bookings",
+            get(account::booking_list).post(account::booking_create),
+        )
         .route("/api/v1/me/bookings/:id", delete(account::booking_delete))
         .route("/api/v1/me/bonuses", get(account::bonus_list))
         .route("/api/v1/me/bonuses/claim", post(account::bonus_claim))
-        .route("/api/v1/me/email-verifications", post(account::email_verification_request))
-        .route("/api/v1/email-verifications/confirm", post(account::email_verification_confirm))
-        .route("/api/v1/password-resets", post(account::password_reset_request))
-        .route("/api/v1/password-resets/confirm", post(account::password_reset_confirm))
-        .route("/api/v1/newsletter-subscriptions", post(account::newsletter_subscribe).delete(account::newsletter_unsubscribe))
-        .route("/api/v1/newsletter-subscriptions/confirm", post(account::newsletter_confirm))
-        .route("/api/v1/newsletter-unsubscriptions/confirm", post(account::newsletter_confirm))
-        .route("/api/v1/me/account/requests", get(account::account_request_list).post(account::account_request_create))
-        .route("/api/v1/me/account/requests/:id", delete(account::account_request_cancel))
-        .route("/api/v1/me/account/requests/:id/payment", post(account::account_request_payment))
-        .route("/api/v1/me/account/transactions", get(account::account_transactions))
+        .route(
+            "/api/v1/me/email-verifications",
+            post(account::email_verification_request),
+        )
+        .route(
+            "/api/v1/email-verifications/confirm",
+            post(account::email_verification_confirm),
+        )
+        .route(
+            "/api/v1/password-resets",
+            post(account::password_reset_request),
+        )
+        .route(
+            "/api/v1/password-resets/confirm",
+            post(account::password_reset_confirm),
+        )
+        .route(
+            "/api/v1/newsletter-subscriptions",
+            post(account::newsletter_subscribe).delete(account::newsletter_unsubscribe),
+        )
+        .route(
+            "/api/v1/newsletter-subscriptions/confirm",
+            post(account::newsletter_confirm),
+        )
+        .route(
+            "/api/v1/newsletter-unsubscriptions/confirm",
+            post(account::newsletter_confirm),
+        )
+        .route(
+            "/api/v1/me/account/requests",
+            get(account::account_request_list).post(account::account_request_create),
+        )
+        .route(
+            "/api/v1/me/account/requests/:id",
+            delete(account::account_request_cancel),
+        )
+        .route(
+            "/api/v1/me/account/requests/:id/payment",
+            post(account::account_request_payment),
+        )
+        .route(
+            "/api/v1/me/account/transactions",
+            get(account::account_transactions),
+        )
         // cart and checkout context
-        .route("/api/v1/me/cart", get(cart::cart_list).post(cart::cart_add))
-        .route("/api/v1/me/cart/:id", patch(cart::cart_update).delete(cart::cart_delete))
+        .route(
+            "/api/v1/me/cart",
+            get(cart::cart_list)
+                .post(cart::cart_add)
+                .delete(flow::clear),
+        )
+        .route(
+            "/api/v1/me/cart/:id",
+            patch(cart::cart_update).delete(cart::cart_delete),
+        )
         .route("/api/v1/checkout/options", get(cart::checkout_options))
         .route("/api/v1/checkout/quote", post(cart::checkout_quote))
+        .route("/api/v1/me/cart/linked-buy", post(flow::linked_buy))
+        .route("/api/v1/me/cart/packages/:id", post(flow::package))
+        .route("/api/v1/me/cart/favourables/:id", post(flow::favourable))
+        .route("/api/v1/me/cart/:id/favorite", post(flow::collect))
+        .route("/api/v1/checkout/selection", get(flow::selection))
+        .route("/api/v1/checkout/selection/:field", patch(flow::select))
+        .route("/api/v1/checkout/funds", get(flow::validate_funds))
+        .route(
+            "/api/v1/checkout/bonuses/:id/validation",
+            post(flow::validate_bonus),
+        )
         // order context
         .route("/api/v1/orders", post(order::order_create))
         .route("/api/v1/me/orders", get(order::order_list))
         .route("/api/v1/me/orders/merge", post(order::order_merge))
-        .route("/api/v1/me/orders/by-number/:order_sn/status", get(order::order_status_by_sn))
+        .route(
+            "/api/v1/me/orders/by-number/:order_sn/status",
+            get(order::order_status_by_sn),
+        )
         .route("/api/v1/me/orders/:id", get(order::order_detail))
         .route("/api/v1/me/orders/:id/cancel", post(order::order_cancel))
-        .route("/api/v1/me/orders/:id/received", post(order::order_received))
-        .route("/api/v1/me/orders/:id/cart", post(order::order_return_to_cart))
+        .route(
+            "/api/v1/me/orders/:id/received",
+            post(order::order_received),
+        )
+        .route(
+            "/api/v1/me/orders/:id/cart",
+            post(order::order_return_to_cart),
+        )
         .route("/api/v1/me/orders/:id/surplus", patch(order::order_surplus))
-        .route("/api/v1/me/orders/:id/payment", patch(order::order_payment_patch))
-        .route("/api/v1/me/orders/:id/address", patch(order::order_address_patch))
+        .route(
+            "/api/v1/me/orders/:id/payment",
+            patch(order::order_payment_patch),
+        )
+        .route(
+            "/api/v1/me/orders/:id/address",
+            patch(order::order_address_patch),
+        )
         .route("/api/v1/me/group-buys", get(order::me_group_buys))
         .route("/api/v1/me/group-buys/:id", get(order::me_group_buy_detail))
+        .route("/api/v1/mock/orders/:id/pay", post(mock::pay))
+        .route("/api/v1/mock/orders/:id/ship", post(mock::ship))
+        .route("/api/v1/mock/deposits/:id/pay", post(mock::deposit))
+        .route("/api/v1/mock/mailbox", get(mock::mailbox))
+        .route("/respond.php", post(payment::legacy_callback))
+        .route("/receive.php", post(payment::legacy_callback))
+        .route("/chinabank_receive.php", post(payment::legacy_callback))
         // payment callback
-        .route("/api/v1/payments/:provider/callback", post(payment::payment_callback))
+        .route(
+            "/api/v1/payments/:provider/callback",
+            post(payment::payment_callback),
+        )
         // compat and supplementary URLs
         .route("/api/v1/me/affiliate", get(compat::affiliate))
         .route("/api/v1/me/shipments", get(compat::shipments))
-        .route("/api/v1/me/points/conversion-options", get(compat::points_options))
-        .route("/api/v1/me/points/conversions", post(compat::points_convert))
-        .route("/api/v1/me/browsing-history", delete(compat::browsing_history_clear))
-        .route("/api/v1/me/pms", get(compat::pm_list).post(compat::pm_create))
+        .route(
+            "/api/v1/me/points/conversion-options",
+            get(compat::points_options),
+        )
+        .route(
+            "/api/v1/me/points/conversions",
+            post(compat::points_convert),
+        )
+        .route(
+            "/api/v1/me/browsing-history",
+            delete(compat::browsing_history_clear),
+        )
+        .route(
+            "/api/v1/me/pms",
+            get(compat::pm_list).post(compat::pm_create),
+        )
         .route("/api/v1/me/pms/:id", delete(compat::pm_delete))
         .route("/api/v1/pick-out", get(compat::pick_out))
         .route("/api/v1/wholesale-goods", get(compat::wholesale_goods))

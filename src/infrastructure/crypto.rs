@@ -8,7 +8,11 @@ pub fn hash_password(password: &str) -> String {
     let salt = rand::random::<[u8; 16]>();
     let iterations: u32 = 60_000;
     let hash = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
-    format!("pbkdf2${iterations}${}${}", hex::encode(salt), hex::encode(hash))
+    format!(
+        "pbkdf2${iterations}${}${}",
+        hex::encode(salt),
+        hex::encode(hash)
+    )
 }
 
 pub fn verify_password(password: &str, stored: &str) -> bool {
@@ -70,6 +74,18 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Verify provider signatures using the MAC implementation's constant-time verification.
+pub fn verify_hmac_sha256_hex(secret: &str, data: &[u8], signature: &str) -> bool {
+    let Ok(bytes) = hex::decode(signature) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(data);
+    mac.verify_slice(&bytes).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,3 +132,4 @@ mod tests {
         );
     }
 }
+
