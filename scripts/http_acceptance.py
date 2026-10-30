@@ -92,7 +92,7 @@ def run():
     seed("UPDATE ecs_users SET is_validated=1 WHERE user_id=?", (uid,))
     request("PATCH", "/api/v1/me", {"email": "new@example.test"}, 204)
     assert not request("GET", "/api/v1/me")["email_verified"]
-    request("POST", "/api/v1/me/email-verifications", {})
+    request("POST", "/api/v1/me/email-verifications", {}, 202)
     assert request("GET", "/api/v1/mock/mailbox")["items"]
     request("GET", "/api/v1/checkout/funds")
     request("GET", "/api/v1/checkout/selection")

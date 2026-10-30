@@ -34,3 +34,7 @@
 | M3 | 结算、下单、库存扣减 | 事务内创建订单与订单项 |
 | M4 | 支付回调、发货、取消/退款 | 幂等回调和订单状态机 |
 | M5 | 后台、促销、内容、监控 | 权限、审计、指标和备份 |
+
+- [Rust 重写静态审计](11_rust_rewrite_audit_2026-10-30.md)
+- [前台 URL 实现与第三方 mock](12_url_implementation_and_mock.md)
+- [注册 URL 清单](13_registered_urls.md)

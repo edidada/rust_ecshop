@@ -365,7 +365,7 @@ pub async fn checkout_quote(
         rb,
         "SELECT c.rec_id AS rec_id, c.goods_id AS goods_id, g.goods_name AS goods_name, g.shop_price AS shop_price, c.goods_number AS goods_number
          FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
-         WHERE c.user_id = ? AND g.is_on_sale = 1 AND g.is_delete = 0 ORDER BY c.rec_id",
+         WHERE c.user_id = ? ORDER BY c.rec_id",
         vec![json!(auth.user_id)],
     )
     .await?;

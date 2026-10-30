@@ -1,5 +1,7 @@
 # PHP URL 覆盖矩阵
 
+> 2026-10-30 更新：本表原有 DONE 是历史路由覆盖标记，不能作为业务等价验收。新增写接口与仍有限制的语义见 [实现与 mock](12_url_implementation_and_mock.md)，当前全部注册路径见 [URL 清单](13_registered_urls.md)。
+
 本文件是“实现所有 URL”目标的审计清单。参考源固定为
 `third_party/shopex-ecshop/upload`（PHP 子模块）；Rust 实现位于 `src/http/routes/`，
 按 bounded context 拆分：goods、content、marketing、community、widgets、auth、account、
@@ -11,7 +13,7 @@ MySQL 生产实现复用同一套 SQL 形态，切换驱动时按 `infrastructur
 
 ## 顶层 PHP 入口
 
-| PHP 入口 | 状态 | C++ URL / 后续工作 |
+| PHP 入口 | 状态 | Rust URL / 后续工作 |
 | --- | --- | --- |
 | `index.php` | DONE | `GET /api/v1/home` |
 | `catalog.php` | DONE | `GET /api/v1/catalog` |

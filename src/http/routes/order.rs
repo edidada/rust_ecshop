@@ -608,6 +608,13 @@ pub async fn order_merge(
         .await?
         .ok_or_else(|| AppError::NotFound("pending order not found".to_string()))
     }
+    let special=q1(&tx,"SELECT COUNT(*) AS cnt FROM ecs_checkout_audit WHERE order_id IN(?,?) AND discount_cents<>0",vec![json!(body.from_order_id),json!(body.to_order_id)]).await?.map(|r|col_i64(&r,"cnt")).unwrap_or(0);
+    let sku=q1(&tx,"SELECT COUNT(*) AS cnt FROM ecs_order_spec WHERE order_id IN(?,?) AND (product_id<>0 OR attributes<>'[]')",vec![json!(body.from_order_id),json!(body.to_order_id)]).await?.map(|r|col_i64(&r,"cnt")).unwrap_or(0);
+    if special > 0 || sku > 0 {
+        return Err(AppError::Conflict(
+            "discounted or SKU orders cannot be merged".into(),
+        ));
+    }
     let from = load_pending(&tx, body.from_order_id, user_id).await?;
     let to = load_pending(&tx, body.to_order_id, user_id).await?;
     // Orders that already used account balance must not be merged (funds attribution).
@@ -632,7 +639,7 @@ pub async fn order_merge(
     let result = e(
         &tx,
         "INSERT INTO ecs_order_info (order_sn, user_id, order_status, consignee, address, mobile, shipping_id, pay_id, goods_amount, shipping_fee, payment_fee, order_amount, idempotency_key, request_fingerprint, remark, created_at)
-         VALUES (?, ?, 'pending_payment', ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?)",
+         VALUES (?, ?, 'pending_payment', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)",
         vec![
             json!(order_sn),
             json!(user_id),
@@ -645,6 +652,7 @@ pub async fn order_merge(
             json!(shipping_fee as f64 / 100.0),
             json!(payment_fee as f64 / 100.0),
             json!(order_amount as f64 / 100.0),
+            json!(format!("merge-{}",uuid::Uuid::new_v4())),
             json!(col_str(&from, "remark")),
             json!(unix_now()),
         ],
@@ -693,13 +701,13 @@ pub async fn order_merge(
     .await?;
     e(
         &tx,
-        "DELETE FROM ecs_order_info WHERE order_id = ?",
+        "UPDATE ecs_order_info SET order_status='merged' WHERE order_id = ?",
         vec![json!(body.from_order_id)],
     )
     .await?;
     e(
         &tx,
-        "DELETE FROM ecs_order_info WHERE order_id = ?",
+        "UPDATE ecs_order_info SET order_status='merged' WHERE order_id = ?",
         vec![json!(body.to_order_id)],
     )
     .await?;
