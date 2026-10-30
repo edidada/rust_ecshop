@@ -58,6 +58,7 @@ jobs:
   mysql:
     name: MySQL 8 runtime acceptance
     runs-on: ubuntu-latest
+
     services:
       mysql:
         image: mysql:8.0
@@ -110,3 +111,40 @@ jobs:
           path: |
             target/http-server.log
             target/http-results.json
+
+  linux-curl:
+    name: Linux curl endpoint journey
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build
+      - name: Start server and run the curl journey
+        env:
+          ECSHOP_PORT: "28995"
+          ECSHOP_DATABASE_URL: "sqlite://target/curl-journey.sqlite3"
+          ECSHOP_INTEGRATION_MODE: "mock"
+          ECSHOP_ENV: "test"
+          ECSHOP_PAYMENT_CALLBACK_SECRET: "curl-ci-secret"
+          ECSHOP_CHINABANK_KEY: "curl-chinabank-key"
+          ECSHOP_ALIPAY_KEY: "curl-alipay-key"
+          ECSHOP_ALIPAY_PARTNER: "curl-partner"
+          ECSHOP_ALIPAY_ACCOUNT: "seller@example.test"
+        run: |
+          set -euo pipefail
+          target/debug/rust_ecshop > target/curl-server.log 2>&1 &
+          for attempt in $(seq 1 120); do
+            if curl -sS -o /dev/null http://127.0.0.1:28995/healthz; then break; fi
+            sleep 0.5
+          done
+          bash scripts/curl_api_test.sh
+      - name: Upload journey evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: curl-journey-linux
+          path: |
+            target/curl-server.log
+            docs/curl/responses/run.log
