@@ -39,7 +39,8 @@ def mysql_connect():
 def translate_sql(sql):
     sql = sql.replace("INSERT OR IGNORE", "INSERT IGNORE")
     sql = sql.replace("INSERT OR REPLACE", "REPLACE")
-    return sql
+    # mysql-connector only interpolates %s placeholders.
+    return sql.replace("?", "%s")
 
 
 def request(method, path, body=None, status=200, auth=True, key=None):
