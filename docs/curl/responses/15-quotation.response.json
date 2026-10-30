@@ -1,0 +1,1 @@
+{"items":[{"category_id":1,"category_name":"示例分类","goods_id":12,"name":"C++ 入门商品","price":"49.90","skus":[{"attr_signature":"1001|1005","product_id":81,"sn":"CPP-EC-001-EXT","stock":10}],"stock":18},{"category_id":1,"category_name":"示例分类","goods_id":14,"name":"C++ 进阶商品","price":"79.90","skus":[],"stock":9}],"page":1,"page_size":20,"total":2}

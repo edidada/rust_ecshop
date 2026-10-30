@@ -1,0 +1,1 @@
+{"items":[{"desc":"组合购买两个示例商品","end_time":4102444800,"id":2,"items":[{"goods_id":12,"name":"C++ 入门商品","price":"49.90","quantity":1},{"goods_id":14,"name":"C++ 进阶商品","price":"79.90","quantity":1}],"name":"C++ 学习礼包","package_price":"119.00","saving":"10.80","start_time":0,"subtotal":"129.80"}]}

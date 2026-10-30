@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel><title>ECSHOP Feed</title><link>http://127.0.0.1:28080</link><item><title>C++ 进阶商品</title><description>用于验证商品对比的第二个公开商品</description><link>http://127.0.0.1:28080/#/goods/14</link></item><item><title>C++ 入门商品</title><description>用于验证第一个 HTTP URL 的示例商品</description><link>http://127.0.0.1:28080/#/goods/12</link></item></channel></rss>

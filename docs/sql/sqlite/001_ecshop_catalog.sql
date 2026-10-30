@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS ecs_affiliate_log (
  FOREIGN KEY(order_id) REFERENCES ecs_order_info(order_id) ON DELETE CASCADE,FOREIGN KEY(user_id) REFERENCES ecs_users(user_id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS idx_ecs_affiliate_log_user ON ecs_affiliate_log(user_id,log_id);
 CREATE TABLE IF NOT EXISTS ecs_comment (
- comment_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_type INTEGER NOT NULL DEFAULT 0, id_value INTEGER NOT NULL, user_id INTEGER NOT NULL, user_name VARCHAR(60) NOT NULL, content TEXT NOT NULL, status INTEGER NOT NULL DEFAULT 1, add_time INTEGER NOT NULL DEFAULT (unixepoch()), FOREIGN KEY(id_value) REFERENCES ecs_goods(goods_id), FOREIGN KEY(user_id) REFERENCES ecs_users(user_id));
+ comment_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_type INTEGER NOT NULL DEFAULT 0, id_value INTEGER NOT NULL, user_id INTEGER NOT NULL, user_name VARCHAR(60) NOT NULL, content TEXT NOT NULL, status INTEGER NOT NULL DEFAULT 1, add_time INTEGER NOT NULL DEFAULT (unixepoch()), parent_id INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(id_value) REFERENCES ecs_goods(goods_id), FOREIGN KEY(user_id) REFERENCES ecs_users(user_id));
+CREATE INDEX IF NOT EXISTS idx_ecs_comment_parent ON ecs_comment(parent_id, comment_id);
 CREATE INDEX IF NOT EXISTS idx_ecs_comment_goods_status ON ecs_comment(id_value,status,comment_id DESC);
 CREATE TABLE IF NOT EXISTS ecs_pay_log (
  log_id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, provider VARCHAR(60) NOT NULL, provider_trade_no VARCHAR(120) NOT NULL, amount DECIMAL(12,2) NOT NULL, status VARCHAR(32) NOT NULL, raw_payload TEXT NOT NULL, received_at INTEGER NOT NULL DEFAULT (unixepoch()), UNIQUE(provider,provider_trade_no), FOREIGN KEY(order_id) REFERENCES ecs_order_info(order_id));
