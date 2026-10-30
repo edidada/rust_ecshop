@@ -45,15 +45,21 @@ pub fn cents_to_string(cents: i64) -> String {
 pub fn parse_money_cents(value: &str, field: &str) -> Result<i64, AppError> {
     let s = value.trim();
     if s.is_empty() {
-        return Err(AppError::Validation(format!("{field} must be a decimal string")));
+        return Err(AppError::Validation(format!(
+            "{field} must be a decimal string"
+        )));
     }
     let parts: Vec<&str> = s.split('.').collect();
     if parts.len() > 2 {
-        return Err(AppError::Validation(format!("{field} must be a decimal string")));
+        return Err(AppError::Validation(format!(
+            "{field} must be a decimal string"
+        )));
     }
     let int_part = parts[0];
     if int_part.is_empty() || !int_part.chars().all(|c| c.is_ascii_digit()) {
-        return Err(AppError::Validation(format!("{field} must be a decimal string")));
+        return Err(AppError::Validation(format!(
+            "{field} must be a decimal string"
+        )));
     }
     let mut cents: i64 = int_part
         .parse::<i64>()
@@ -63,7 +69,9 @@ pub fn parse_money_cents(value: &str, field: &str) -> Result<i64, AppError> {
     if parts.len() == 2 {
         let frac = parts[1];
         if frac.len() > 2 || !frac.chars().all(|c| c.is_ascii_digit()) {
-            return Err(AppError::Validation(format!("{field} must be a decimal string")));
+            return Err(AppError::Validation(format!(
+                "{field} must be a decimal string"
+            )));
         }
         let mut frac_cents: i64 = 0;
         if !frac.is_empty() {
@@ -72,9 +80,9 @@ pub fn parse_money_cents(value: &str, field: &str) -> Result<i64, AppError> {
                 frac_cents *= 10;
             }
         }
-        cents = cents.checked_add(frac_cents).ok_or_else(|| {
-            AppError::Validation(format!("{field} is out of range"))
-        })?;
+        cents = cents
+            .checked_add(frac_cents)
+            .ok_or_else(|| AppError::Validation(format!("{field} is out of range")))?;
     }
     Ok(cents)
 }

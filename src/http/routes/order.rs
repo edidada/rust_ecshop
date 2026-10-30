@@ -110,6 +110,7 @@ pub async fn order_create(
     let rb = state.rb;
     let user_id = auth.user_id;
     let tx = crate::infrastructure::db::begin(rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     // Idempotency replay handling.
     let existing = q1(
         &tx,
@@ -157,7 +158,7 @@ pub async fn order_create(
     // Re-read cart inside the transaction.
     let mut cart_rows = q(
         &tx,
-        "SELECT c.goods_id AS goods_id, c.goods_number AS goods_number, g.goods_name AS goods_name, g.shop_price AS shop_price, g.is_on_sale AS is_on_sale, g.is_delete AS is_delete
+        "SELECT c.goods_id AS goods_id, c.goods_number AS goods_number, g.goods_name AS goods_name, g.shop_price AS shop_price, g.cat_id AS cat_id, g.brand_id AS brand_id, g.is_on_sale AS is_on_sale, g.is_delete AS is_delete
          FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
          WHERE c.user_id = ? ORDER BY c.goods_id",
         vec![json!(user_id)],
@@ -201,7 +202,7 @@ pub async fn order_create(
             acc.checked_add(price.checked_mul(qty)?)
         })
         .ok_or_else(|| AppError::Validation("amount overflow".to_string()))?;
-    let adjustment = super::flow::adjustments(&tx, user_id, goods_amount).await?;
+    let adjustment = super::flow::adjustments(&tx, user_id, goods_amount, &cart_rows).await?;
     let order_amount = goods_amount
         .checked_add(shipping_fee)
         .and_then(|v| v.checked_add(payment_fee))
@@ -234,7 +235,52 @@ pub async fn order_create(
     )
     .await?;
     let order_id = insert_id(&result);
+    // Free gift lines from the selected FAT_GOODS offer are snapshotted as
+    // zero-price order goods and their stock is deducted once, all before the
+    // checkout selection (and pending gifts) are consumed in flow::apply.
+    let gifts = q(
+        &tx,
+        "SELECT gf.goods_id AS goods_id, gf.quantity AS quantity, g.goods_name AS goods_name
+         FROM ecs_cart_gift gf JOIN ecs_goods g ON g.goods_id = gf.goods_id
+         WHERE gf.user_id = ? ORDER BY gf.goods_id",
+        vec![json!(user_id)],
+    )
+    .await?;
+    for gift in &gifts {
+        let goods_id = col_i64(gift, "goods_id");
+        let quantity = col_i64(gift, "quantity");
+        let deducted = e(
+            &tx,
+            "UPDATE ecs_goods SET goods_number = goods_number - ? WHERE goods_id = ? AND goods_number >= ? AND is_on_sale = 1 AND is_delete = 0",
+            vec![json!(quantity), json!(goods_id), json!(quantity)],
+        )
+        .await?;
+        if deducted.rows_affected != 1 {
+            return Err(AppError::Conflict("insufficient gift stock".into()));
+        }
+        e(
+            &tx,
+            "INSERT INTO ecs_order_goods (order_id, goods_id, goods_name, goods_number, goods_price)
+             VALUES (?, ?, ?, ?, 0)",
+            vec![
+                json!(order_id),
+                json!(goods_id),
+                json!(col_str(gift, "goods_name")),
+                json!(quantity),
+            ],
+        )
+        .await?;
+    }
     super::flow::apply(&tx, user_id, order_id, order_amount, &adjustment).await?;
+    // Snapshot the promotion binding once (audit keeps the selection JSON too).
+    if adjustment.offer_id > 0 {
+        e(
+            &tx,
+            "INSERT INTO ecs_order_promotion(order_id, promotion_id, promotion_type) VALUES (?, ?, 'favourable')",
+            vec![json!(order_id), json!(adjustment.offer_id)],
+        )
+        .await?;
+    }
     for row in &cart_rows {
         e(
             &tx,
@@ -383,6 +429,7 @@ pub async fn order_cancel(
     let order_id = parse_id(&id)?;
     let rb = state.rb;
     let tx = crate::infrastructure::db::begin(rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let updated = e(
         &tx,
         "UPDATE ecs_order_info SET order_status = 'cancelled' WHERE order_id = ? AND user_id = ? AND order_status = 'pending_payment'",
@@ -490,24 +537,35 @@ pub async fn order_received(
 ) -> Result<Json<Value>, AppError> {
     let order_id = parse_id(&id)?;
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
+    let summary = confirm_receipt_tx(&tx, order_id, auth.user_id).await?;
+    tx.commit().await?;
+    Ok(Json(summary))
+}
+
+/// Shared received-state machine for order_received and the legacy receive.php
+/// entry: only an owned order in `shipped` can move to `received`.
+pub async fn confirm_receipt_tx<E: rbatis::executor::Executor>(
+    tx: &E,
+    order_id: i64,
+    user_id: i64,
+) -> Result<Value, AppError> {
     let updated = e(
-        &tx,
+        tx,
         "UPDATE ecs_order_info SET order_status = 'received' WHERE order_id = ? AND user_id = ? AND order_status = 'shipped'",
-        vec![json!(order_id), json!(auth.user_id)],
+        vec![json!(order_id), json!(user_id)],
     )
     .await?;
     if updated.rows_affected == 0 {
         return Err(AppError::Conflict("order is not shipped".to_string()));
     }
     e(
-        &tx,
+        tx,
         "INSERT INTO ecs_order_action (order_id, actor_user_id, action, note, created_at) VALUES (?, ?, 'confirm_received', '', ?)",
-        vec![json!(order_id), json!(auth.user_id), json!(unix_now())],
+        vec![json!(order_id), json!(user_id), json!(unix_now())],
     )
     .await?;
-    let summary = fetch_order_summary_tx(&tx, order_id, auth.user_id).await?;
-    tx.commit().await?;
-    Ok(Json(summary))
+    fetch_order_summary_tx(tx, order_id, user_id).await
 }
 
 /// POST /api/v1/me/orders/{id}/cart — return sellable order goods to the cart.
@@ -519,6 +577,7 @@ pub async fn order_return_to_cart(
     let order_id = parse_id(&id)?;
     let rb = state.rb;
     let tx = crate::infrastructure::db::begin(rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let owned = q1(
         &tx,
         "SELECT COUNT(*) AS cnt FROM ecs_order_info WHERE order_id = ? AND user_id = ?",
@@ -592,6 +651,7 @@ pub async fn order_merge(
     let rb = state.rb;
     let user_id = auth.user_id;
     let tx = crate::infrastructure::db::begin(rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     async fn load_pending<E: rbatis::executor::Executor>(
         tx: &E,
         oid: i64,
@@ -610,9 +670,10 @@ pub async fn order_merge(
     }
     let special=q1(&tx,"SELECT COUNT(*) AS cnt FROM ecs_checkout_audit WHERE order_id IN(?,?) AND discount_cents<>0",vec![json!(body.from_order_id),json!(body.to_order_id)]).await?.map(|r|col_i64(&r,"cnt")).unwrap_or(0);
     let sku=q1(&tx,"SELECT COUNT(*) AS cnt FROM ecs_order_spec WHERE order_id IN(?,?) AND (product_id<>0 OR attributes<>'[]')",vec![json!(body.from_order_id),json!(body.to_order_id)]).await?.map(|r|col_i64(&r,"cnt")).unwrap_or(0);
-    if special > 0 || sku > 0 {
+    let gifted=q1(&tx,"SELECT COUNT(*) AS cnt FROM ecs_order_promotion WHERE order_id IN(?,?) AND promotion_type='favourable'",vec![json!(body.from_order_id),json!(body.to_order_id)]).await?.map(|r|col_i64(&r,"cnt")).unwrap_or(0);
+    if special > 0 || sku > 0 || gifted > 0 {
         return Err(AppError::Conflict(
-            "discounted or SKU orders cannot be merged".into(),
+            "discounted, gifted or SKU orders cannot be merged".into(),
         ));
     }
     let from = load_pending(&tx, body.from_order_id, user_id).await?;
@@ -767,6 +828,7 @@ pub async fn order_surplus(
     }
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let order = q1(
         &tx,
         "SELECT order_amount AS order_amount
@@ -859,6 +921,7 @@ pub async fn order_payment_patch(
     let order_id = parse_id(&id)?;
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let order = q1(
         &tx,
         "SELECT pay_id AS pay_id, payment_fee AS payment_fee, order_amount AS order_amount
@@ -945,6 +1008,7 @@ pub async fn order_address_patch(
     }
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let updated = e(
         &tx,
         "UPDATE ecs_order_info SET consignee = ?, address = ?, mobile = ?

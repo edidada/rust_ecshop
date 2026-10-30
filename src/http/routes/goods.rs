@@ -489,6 +489,7 @@ pub struct PriceQuoteRequest {
 
 pub async fn price_quote(
     State(state): State<AppState>,
+    auth: Option<crate::http::auth::AuthUser>,
     Path(id): Path<String>,
     Json(body): Json<PriceQuoteRequest>,
 ) -> Result<Json<Value>, AppError> {
@@ -508,8 +509,10 @@ pub async fn price_quote(
     .await?
     .ok_or_else(|| AppError::NotFound("goods not found".to_string()))?;
     let attrs = body.attribute_ids.unwrap_or_default();
+    let user_id = auth.map(|a| a.user_id).unwrap_or(0);
     let unit_price = super::pricing::unit(
         rb,
+        user_id,
         goods_id,
         body.quantity,
         body.product_id.unwrap_or(0),

@@ -139,9 +139,14 @@ pub async fn goods_widget(
     let brand_id = parse_i64_param(qq.brand_id.as_deref(), "brand_id")?;
     let goods_num = parse_i64_param(qq.goods_num.as_deref(), "goods_num")?.unwrap_or(10);
     if !(1..=50).contains(&goods_num) {
-        return Err(AppError::Validation("goods_num must be between 1 and 50".to_string()));
+        return Err(AppError::Validation(
+            "goods_num must be between 1 and 50".to_string(),
+        ));
     }
-    let intro_type = qq.intro_type.clone().unwrap_or_else(|| "is_new".to_string());
+    let intro_type = qq
+        .intro_type
+        .clone()
+        .unwrap_or_else(|| "is_new".to_string());
     if !matches!(
         intro_type.as_str(),
         "is_best" | "is_new" | "is_hot" | "is_promote" | "is_random"
@@ -192,7 +197,10 @@ pub async fn goods_widget(
         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
     );
     Ok((
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
         js,
     )
         .into_response())
@@ -203,11 +211,31 @@ pub async fn sitemap(State(state): State<AppState>) -> Result<Response, AppError
     let base_url = state.config.site_base_url.clone();
     let rb = state.rb;
     let mut urls: Vec<String> = vec![format!("{}/", base_url)];
-    for row in q(rb, "SELECT cat_id AS cat_id FROM ecs_category WHERE is_show = 1 ORDER BY cat_id", vec![]).await? {
-        urls.push(format!("{}/#/category/{}", base_url, col_i64(&row, "cat_id")));
+    for row in q(
+        rb,
+        "SELECT cat_id AS cat_id FROM ecs_category WHERE is_show = 1 ORDER BY cat_id",
+        vec![],
+    )
+    .await?
+    {
+        urls.push(format!(
+            "{}/#/category/{}",
+            base_url,
+            col_i64(&row, "cat_id")
+        ));
     }
-    for row in q(rb, "SELECT cat_id AS cat_id FROM ecs_article_cat WHERE is_show = 1 ORDER BY cat_id", vec![]).await? {
-        urls.push(format!("{}/#/article-cat/{}", base_url, col_i64(&row, "cat_id")));
+    for row in q(
+        rb,
+        "SELECT cat_id AS cat_id FROM ecs_article_cat WHERE is_show = 1 ORDER BY cat_id",
+        vec![],
+    )
+    .await?
+    {
+        urls.push(format!(
+            "{}/#/article-cat/{}",
+            base_url,
+            col_i64(&row, "cat_id")
+        ));
     }
     for row in q(
         rb,
@@ -258,7 +286,10 @@ pub async fn feed(
     let feed_type = qq.feed_type.clone().unwrap_or_default();
     let mut items: Vec<(String, String, String)> = Vec::new();
     if feed_type.starts_with("article_cat") {
-        let cat_id: i64 = feed_type.trim_start_matches("article_cat").parse().unwrap_or(0);
+        let cat_id: i64 = feed_type
+            .trim_start_matches("article_cat")
+            .parse()
+            .unwrap_or(0);
         for row in q(
             rb,
             "SELECT title AS title, article_desc AS article_desc, article_id AS article_id

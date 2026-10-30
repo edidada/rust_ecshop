@@ -43,6 +43,7 @@ pub async fn cart_add(
     }
     let rb = state.rb;
     let tx = crate::infrastructure::db::begin(rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let goods = q1(
         &tx,
         "SELECT goods_name AS goods_name, shop_price AS shop_price, goods_number AS goods_number
@@ -65,6 +66,7 @@ pub async fn cart_add(
     }
     let price_cents = super::pricing::unit(
         &tx,
+        auth.user_id,
         body.goods_id,
         new_qty,
         body.product_id,
@@ -202,6 +204,7 @@ pub async fn cart_update(
         ));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     // Optimistic lock: WHERE matches id, user and version.
     let updated = e(
         &tx,
@@ -250,6 +253,7 @@ pub async fn cart_delete(
 ) -> Result<StatusCode, AppError> {
     let rec_id = parse_id(&id)?;
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     e(&tx,"DELETE FROM ecs_cart_spec WHERE user_id=? AND goods_id IN(SELECT goods_id FROM ecs_cart WHERE rec_id=? AND user_id=?)",vec![json!(auth.user_id),json!(rec_id),json!(auth.user_id)]).await?;
     let deleted = e(
         &tx,
@@ -363,7 +367,7 @@ pub async fn checkout_quote(
     .ok_or_else(|| AppError::NotFound("payment not found or disabled".to_string()))?;
     let mut rows = q(
         rb,
-        "SELECT c.rec_id AS rec_id, c.goods_id AS goods_id, g.goods_name AS goods_name, g.shop_price AS shop_price, c.goods_number AS goods_number
+        "SELECT c.rec_id AS rec_id, c.goods_id AS goods_id, g.goods_name AS goods_name, g.shop_price AS shop_price, g.cat_id AS cat_id, g.brand_id AS brand_id, c.goods_number AS goods_number
          FROM ecs_cart c JOIN ecs_goods g ON g.goods_id = c.goods_id
          WHERE c.user_id = ? ORDER BY c.rec_id",
         vec![json!(auth.user_id)],
@@ -393,13 +397,31 @@ pub async fn checkout_quote(
             "quantity": quantity,
         }));
     }
-    let adjustment = super::flow::adjustments(rb, auth.user_id, goods_amount).await?;
+    let adjustment = super::flow::adjustments(rb, auth.user_id, goods_amount, &rows).await?;
     let order_amount = goods_amount
         .checked_add(shipping_fee)
         .and_then(|v| v.checked_add(payment_fee))
         .and_then(|v| v.checked_add(adjustment.extra))
         .and_then(|v| v.checked_sub(adjustment.discount))
         .ok_or_else(|| AppError::Validation("amount overflow".into()))?;
+    let gifts: Vec<Value> = q(
+        rb,
+        "SELECT gf.goods_id AS goods_id, gf.quantity AS quantity, g.goods_name AS goods_name
+         FROM ecs_cart_gift gf JOIN ecs_goods g ON g.goods_id = gf.goods_id
+         WHERE gf.user_id = ? ORDER BY gf.goods_id",
+        vec![json!(auth.user_id)],
+    )
+    .await?
+    .into_iter()
+    .map(|g| {
+        json!({
+            "goods_id": col_i64(&g, "goods_id"),
+            "name": col_str(&g, "goods_name"),
+            "quantity": col_i64(&g, "quantity"),
+            "price": cents_to_string(0),
+        })
+    })
+    .collect();
     Ok(Json(json!({
         "address_id": body.address_id,
         "consignee": col_str(&address, "consignee"),
@@ -407,6 +429,7 @@ pub async fn checkout_quote(
         "shipping_id": body.shipping_id,
         "payment_id": body.payment_id,
         "items": items,
+        "gifts": gifts,
         "goods_amount": cents_to_string(goods_amount),
         "shipping_fee": cents_to_string(shipping_fee),
         "payment_fee": cents_to_string(payment_fee),

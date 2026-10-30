@@ -8,13 +8,15 @@ use serde_json::{json, Value};
 use crate::http::auth::AuthUser;
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{col_i64, col_str, col_opt_str, e, insert_id, q, q1};
+use crate::shared::rbutil::{col_i64, col_opt_str, col_str, e, insert_id, q, q1};
 use crate::shared::util::unix_now;
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
         Ok(v) if v > 0 => Ok(v),
-        _ => Err(AppError::Validation("id must be a positive integer".to_string())),
+        _ => Err(AppError::Validation(
+            "id must be a positive integer".to_string(),
+        )),
     }
 }
 
@@ -66,19 +68,29 @@ pub async fn messages_create(
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     let content_len = body.content.len();
     if !(1..=2000).contains(&content_len) {
-        return Err(AppError::Validation("content must be 1-2000 bytes".to_string()));
+        return Err(AppError::Validation(
+            "content must be 1-2000 bytes".to_string(),
+        ));
     }
     if body.title.len() > 200 {
-        return Err(AppError::Validation("title must be at most 200 bytes".to_string()));
+        return Err(AppError::Validation(
+            "title must be at most 200 bytes".to_string(),
+        ));
     }
     if body.username.len() > 60 || body.email.len() > 60 {
-        return Err(AppError::Validation("username/email must be at most 60 bytes".to_string()));
+        return Err(AppError::Validation(
+            "username/email must be at most 60 bytes".to_string(),
+        ));
     }
     let (user_id, user_name) = match (&auth, body.anonymous) {
         (Some(a), false) => (a.user_id, a.user_name.clone()),
         _ => (0, "anonymous".to_string()),
     };
-    let display_name = if user_id != 0 { user_name } else { body.username.clone() };
+    let display_name = if user_id != 0 {
+        user_name
+    } else {
+        body.username.clone()
+    };
     let now = unix_now();
     let result = e(
         state.rb,
@@ -95,7 +107,10 @@ pub async fn messages_create(
         ],
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(json!({"id": insert_id(&result), "status": "published"}))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"id": insert_id(&result), "status": "published"})),
+    ))
 }
 
 /// GET /api/v1/me/messages — current user's top-level messages with first reply.
@@ -141,6 +156,7 @@ pub async fn me_message_delete(
 ) -> Result<StatusCode, AppError> {
     let msg_id = parse_id(&id)?;
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let deleted = e(
         &tx,
         "DELETE FROM ecs_feedback WHERE msg_id = ? AND user_id = ?",
@@ -175,7 +191,9 @@ pub async fn goods_comment_create(
     let goods_id = parse_id(&id)?;
     let content_len = body.content.len();
     if !(1..=2000).contains(&content_len) {
-        return Err(AppError::Validation("content must be 1-2000 bytes".to_string()));
+        return Err(AppError::Validation(
+            "content must be 1-2000 bytes".to_string(),
+        ));
     }
     let rb = state.rb;
     let exists = q1(
@@ -202,7 +220,10 @@ pub async fn goods_comment_create(
         ],
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(json!({"id": insert_id(&result), "status": "published"}))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"id": insert_id(&result), "status": "published"})),
+    ))
 }
 
 /// GET /api/v1/me/comments — current user's top-level comments with first reply.
@@ -320,15 +341,20 @@ pub async fn goods_tag_create(
         .filter(|s| !s.is_empty())
         .collect();
     if tags.is_empty() || tags.len() > 10 {
-        return Err(AppError::Validation("tag must contain 1-10 comma-separated items".to_string()));
+        return Err(AppError::Validation(
+            "tag must contain 1-10 comma-separated items".to_string(),
+        ));
     }
     for t in &tags {
         if t.len() > 255 {
-            return Err(AppError::Validation("each tag must be at most 255 bytes".to_string()));
+            return Err(AppError::Validation(
+                "each tag must be at most 255 bytes".to_string(),
+            ));
         }
     }
     let rb = state.rb;
     let tx = crate::infrastructure::db::begin(rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let exists = q1(
         &tx,
         "SELECT COUNT(*) AS cnt FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",

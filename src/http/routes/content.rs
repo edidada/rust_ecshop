@@ -6,13 +6,15 @@ use serde_json::{json, Value};
 
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{col_i64, col_opt_str, col_str, col_cents, col_f64, q, q1};
+use crate::shared::rbutil::{col_cents, col_f64, col_i64, col_opt_str, col_str, q, q1};
 use crate::shared::util::{cents_to_string, parse_i64_param, PageParams};
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
         Ok(v) if v > 0 => Ok(v),
-        _ => Err(AppError::Validation("id must be a positive integer".to_string())),
+        _ => Err(AppError::Validation(
+            "id must be a positive integer".to_string(),
+        )),
     }
 }
 
@@ -138,7 +140,9 @@ pub async fn article_category_articles(
         })
     })
     .collect::<Vec<_>>();
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "items": items}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -157,7 +161,10 @@ pub async fn shipping_options(
     Query(qq): Query<ShippingOptionsQuery>,
 ) -> Result<Json<Value>, AppError> {
     let rb = state.rb;
-    async fn parent_of(rb: &rbatis::rbatis::RBatis, region_id: i64) -> Result<Option<i64>, AppError> {
+    async fn parent_of(
+        rb: &rbatis::rbatis::RBatis,
+        region_id: i64,
+    ) -> Result<Option<i64>, AppError> {
         Ok(q1(
             rb,
             "SELECT parent_id AS parent_id FROM ecs_region WHERE region_id = ?",
@@ -172,7 +179,9 @@ pub async fn shipping_options(
             .ok_or_else(|| AppError::Validation("province region not found".to_string()))?;
         if let Some(cid) = qq.country_id {
             if parent != cid {
-                return Err(AppError::Validation("province does not belong to country".to_string()));
+                return Err(AppError::Validation(
+                    "province does not belong to country".to_string(),
+                ));
             }
         }
     }
@@ -181,7 +190,9 @@ pub async fn shipping_options(
             .await?
             .ok_or_else(|| AppError::Validation("city region not found".to_string()))?;
         if parent != p {
-            return Err(AppError::Validation("city does not belong to province".to_string()));
+            return Err(AppError::Validation(
+                "city does not belong to province".to_string(),
+            ));
         }
     }
     if let (Some(c), Some(d)) = (qq.city_id, qq.district_id) {
@@ -189,7 +200,9 @@ pub async fn shipping_options(
             .await?
             .ok_or_else(|| AppError::Validation("district region not found".to_string()))?;
         if parent != c {
-            return Err(AppError::Validation("district does not belong to city".to_string()));
+            return Err(AppError::Validation(
+                "district does not belong to city".to_string(),
+            ));
         }
     }
     let items = q(
@@ -229,7 +242,10 @@ pub async fn quotation(
     State(state): State<AppState>,
     Query(qq): Query<QuotationQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let page = PageParams { page: qq.page, page_size: qq.page_size };
+    let page = PageParams {
+        page: qq.page,
+        page_size: qq.page_size,
+    };
     let (page_no, page_size, offset) = page.resolve();
     let rb = state.rb;
     let mut where_clause = "WHERE g.is_on_sale = 1 AND g.is_delete = 0".to_string();
@@ -247,7 +263,10 @@ pub async fn quotation(
         where_clause.push_str(" AND g.goods_name LIKE ? ESCAPE '\\'");
         let escaped = format!(
             "%{}%",
-            keyword.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            keyword
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
         );
         args.push(json!(escaped));
     }
@@ -302,7 +321,9 @@ pub async fn quotation(
             "skus": skus,
         }));
     }
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "items": items}),
+    ))
 }
 
 #[allow(dead_code)]

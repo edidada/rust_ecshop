@@ -11,6 +11,14 @@ pub struct AppConfig {
     pub database_url: String,
     pub payment_callback_secret: String,
     pub site_base_url: String,
+    /// Chinabank MD5 key; empty means the legacy channel is disabled.
+    pub chinabank_key: String,
+    /// Alipay MD5 key; empty means the legacy channel is disabled.
+    pub alipay_key: String,
+    /// Optional Alipay partner id bound server-side when configured.
+    pub alipay_partner: String,
+    /// Optional Alipay seller email bound server-side when configured.
+    pub alipay_account: String,
 }
 
 impl Default for AppConfig {
@@ -21,6 +29,10 @@ impl Default for AppConfig {
             database_url: "sqlite://data/ecshop.sqlite3".to_string(),
             payment_callback_secret: "dev-payment-callback-secret".to_string(),
             site_base_url: "http://127.0.0.1:28080".to_string(),
+            chinabank_key: String::new(),
+            alipay_key: String::new(),
+            alipay_partner: String::new(),
+            alipay_account: String::new(),
         }
     }
 }
@@ -34,16 +46,38 @@ impl AppConfig {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(d.port);
-        let database_url = std::env::var("ECSHOP_DATABASE_URL").unwrap_or_else(|_| d.database_url.clone());
-        let payment_callback_secret =
-            std::env::var("ECSHOP_PAYMENT_CALLBACK_SECRET").unwrap_or_else(|_| d.payment_callback_secret.clone());
-        let site_base_url = std::env::var("ECSHOP_SITE_BASE_URL").unwrap_or_else(|_| d.site_base_url.clone());
+        let database_url =
+            std::env::var("ECSHOP_DATABASE_URL").unwrap_or_else(|_| d.database_url.clone());
+        let payment_callback_secret = std::env::var("ECSHOP_PAYMENT_CALLBACK_SECRET")
+            .unwrap_or_else(|_| d.payment_callback_secret.clone());
+        let site_base_url =
+            std::env::var("ECSHOP_SITE_BASE_URL").unwrap_or_else(|_| d.site_base_url.clone());
+        let chinabank_key = std::env::var("ECSHOP_CHINABANK_KEY")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let alipay_key = std::env::var("ECSHOP_ALIPAY_KEY")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let alipay_partner = std::env::var("ECSHOP_ALIPAY_PARTNER")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let alipay_account = std::env::var("ECSHOP_ALIPAY_ACCOUNT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
         Self {
             host,
             port,
             database_url,
             payment_callback_secret,
             site_base_url,
+            chinabank_key,
+            alipay_key,
+            alipay_partner,
+            alipay_account,
         }
     }
 
@@ -58,6 +92,14 @@ impl AppConfig {
             );
         }
         Ok(())
+    }
+
+    pub fn chinabank_enabled(&self) -> bool {
+        !self.chinabank_key.is_empty()
+    }
+
+    pub fn alipay_enabled(&self) -> bool {
+        !self.alipay_key.is_empty()
     }
 }
 
@@ -85,7 +127,10 @@ mod tests {
     fn validate_rejects_default_secret_in_production() {
         std::env::remove_var("ECSHOP_ENV");
         let config = AppConfig::default();
-        assert!(config.validate().is_ok(), "dev default is allowed outside production");
+        assert!(
+            config.validate().is_ok(),
+            "dev default is allowed outside production"
+        );
         std::env::set_var("ECSHOP_ENV", "production");
         assert!(AppConfig::default().validate().is_err());
         let fixed = AppConfig {

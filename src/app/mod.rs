@@ -1,6 +1,6 @@
 //! Dependency assembly and startup.
 
-use crate::http::state::{AppState, AppConfig};
+use crate::http::state::{AppConfig, AppState};
 use crate::infrastructure::db;
 use crate::shared::error::AppError;
 

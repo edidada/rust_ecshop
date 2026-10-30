@@ -24,7 +24,7 @@ pub fn rbs_to_json(v: rbs::Value) -> Value {
 
 /// Query many rows as JSON objects.
 pub async fn q<E: Executor>(e: &E, sql: &str, params: Vec<Value>) -> AppResult<Vec<Value>> {
-    let rows = Executor::query(e, sql, args(params)).await?;
+    let rows = Executor::query(e, &crate::infrastructure::db::sql(sql), args(params)).await?;
     let json = rbs_to_json(rows);
     Ok(match json {
         Value::Array(items) => items,
@@ -40,7 +40,7 @@ pub async fn q1<E: Executor>(e: &E, sql: &str, params: Vec<Value>) -> AppResult<
 
 /// Execute a write statement.
 pub async fn e<E: Executor>(e: &E, sql: &str, params: Vec<Value>) -> AppResult<ExecResult> {
-    Ok(Executor::exec(e, sql, args(params)).await?)
+    Ok(Executor::exec(e, &crate::infrastructure::db::sql(sql), args(params)).await?)
 }
 
 pub fn insert_id(result: &ExecResult) -> i64 {

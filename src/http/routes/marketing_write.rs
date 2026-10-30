@@ -40,6 +40,7 @@ pub async fn redeem(
     }
     let key = key(&headers)?;
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     if let Some(old) = q1(
         &tx,
         "SELECT * FROM ecs_redemption WHERE user_id=? AND idempotency_key=?",
@@ -93,6 +94,7 @@ pub async fn bid(
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     let price = parse_money_cents(&body.price, "price")?;
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     e(
         &tx,
         "INSERT OR IGNORE INTO ecs_promotion_version(promotion_id) VALUES(?)",
@@ -236,6 +238,7 @@ pub async fn group_buy(
         .as_bytes(),
     );
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     if let Some(row)=q1(&tx,"SELECT order_id AS order_id,request_fingerprint AS fingerprint FROM ecs_order_info WHERE user_id=? AND idempotency_key=?",vec![json!(auth.user_id),json!(key)]).await? {
         if col_str(&row,"fingerprint")!=fingerprint{return Err(AppError::Conflict("idempotency body mismatch".into()));}
         return Ok((StatusCode::OK,Json(json!({"order_id":col_i64(&row,"order_id"),"replayed":true}))));

@@ -78,6 +78,7 @@ pub async fn ship(
 ) -> Result<Json<Value>, AppError> {
     enabled()?;
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let result=e(&tx,"UPDATE ecs_order_info SET order_status = 'shipped' WHERE order_id = ? AND user_id = ? AND order_status = 'paid'",vec![json!(id),json!(auth.user_id)]).await?;
     if result.rows_affected != 1 {
         return Err(AppError::Conflict("paid order required".into()));
@@ -97,6 +98,7 @@ pub async fn deposit(
 ) -> Result<Json<Value>, AppError> {
     enabled()?;
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let intent=q1(&tx,"SELECT amount_cents AS amount_cents,status AS status FROM ecs_account_payment_intent WHERE request_id=? AND user_id=?",vec![json!(id),json!(auth.user_id)]).await?.ok_or_else(||AppError::NotFound("payment intent not found".into()))?;
     if col_str(&intent, "status") == "paid" {
         return Ok(Json(json!({"mock":true,"replayed":true})));

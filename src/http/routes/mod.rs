@@ -235,9 +235,19 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         .route("/api/v1/mock/orders/:id/ship", post(mock::ship))
         .route("/api/v1/mock/deposits/:id/pay", post(mock::deposit))
         .route("/api/v1/mock/mailbox", get(mock::mailbox))
-        .route("/respond.php", post(payment::legacy_callback))
-        .route("/receive.php", post(payment::legacy_callback))
-        .route("/chinabank_receive.php", post(payment::legacy_callback))
+        .route(
+            "/api/v1/me/orders/:id/payment-intents",
+            post(payment::payment_intent_create),
+        )
+        .route(
+            "/respond.php",
+            get(payment::respond_dispatch).post(payment::respond_dispatch),
+        )
+        .route(
+            "/receive.php",
+            get(payment::receive_confirm).post(payment::receive_confirm),
+        )
+        .route("/chinabank_receive.php", post(payment::chinabank_receive))
         // payment callback
         .route(
             "/api/v1/payments/:provider/callback",

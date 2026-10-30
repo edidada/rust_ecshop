@@ -6,13 +6,15 @@ use serde_json::{json, Value};
 
 use crate::http::state::AppState;
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{col_i64, col_str, col_cents, col_f64, e, q, q1};
+use crate::shared::rbutil::{col_cents, col_f64, col_i64, col_str, e, q, q1};
 use crate::shared::util::{cents_to_string, parse_i64_param, unix_now, PageParams};
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
         Ok(v) if v > 0 => Ok(v),
-        _ => Err(AppError::Validation("id must be a positive integer".to_string())),
+        _ => Err(AppError::Validation(
+            "id must be a positive integer".to_string(),
+        )),
     }
 }
 
@@ -70,7 +72,11 @@ pub async fn packages(State(state): State<AppState>) -> Result<Json<Value>, AppE
         // ext_info keeps "package_price" as a JSON string; parse it leniently.
         let package_price_cents = serde_json::from_str::<Value>(&col_str(&row, "ext_info"))
             .ok()
-            .and_then(|v| v.get("package_price").and_then(|p| p.as_str()).map(|s| s.to_string()))
+            .and_then(|v| {
+                v.get("package_price")
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string())
+            })
             .and_then(|s| s.parse::<f64>().ok())
             .map(|f| (f * 100.0).round() as i64)
             .unwrap_or(0);
@@ -126,7 +132,9 @@ pub async fn promotions(
     let act_type = parse_i64_param(qq.act_type.as_deref(), "type")?;
     if let Some(t) = act_type {
         if !(0..=4).contains(&t) {
-            return Err(AppError::Validation("type must be between 0 and 4".to_string()));
+            return Err(AppError::Validation(
+                "type must be between 0 and 4".to_string(),
+            ));
         }
     }
     let now = unix_now();
@@ -318,14 +326,20 @@ pub async fn vote_respond(
     let vote_id = parse_id(&id)?;
     let now = unix_now();
     if body.option_ids.is_empty() {
-        return Err(AppError::Validation("option_ids must not be empty".to_string()));
+        return Err(AppError::Validation(
+            "option_ids must not be empty".to_string(),
+        ));
     }
     let unique: std::collections::BTreeSet<i64> = body.option_ids.iter().copied().collect();
     if unique.len() != body.option_ids.len() {
-        return Err(AppError::Validation("option_ids must be unique".to_string()));
+        return Err(AppError::Validation(
+            "option_ids must be unique".to_string(),
+        ));
     }
     if unique.len() > 20 {
-        return Err(AppError::Validation("option_ids must have at most 20 items".to_string()));
+        return Err(AppError::Validation(
+            "option_ids must have at most 20 items".to_string(),
+        ));
     }
     let rb = state.rb;
     let ip = addr.ip().to_string();
@@ -343,7 +357,9 @@ pub async fn vote_respond(
         return Err(AppError::NotFound("vote not active".to_string()));
     }
     if col_i64(&vote, "can_multi") == 0 && option_ids.len() > 1 {
-        return Err(AppError::Validation("this vote accepts a single option".to_string()));
+        return Err(AppError::Validation(
+            "this vote accepts a single option".to_string(),
+        ));
     }
     for oid in &option_ids {
         let ok = q1(
@@ -355,7 +371,9 @@ pub async fn vote_respond(
         .map(|r| col_i64(&r, "cnt"))
         .unwrap_or(0);
         if ok == 0 {
-            return Err(AppError::Validation(format!("option {oid} does not belong to vote {vote_id}")));
+            return Err(AppError::Validation(format!(
+                "option {oid} does not belong to vote {vote_id}"
+            )));
         }
     }
     let dup = q1(
@@ -410,7 +428,10 @@ pub async fn exchange_goods(
     State(state): State<AppState>,
     Query(qq): Query<ExchangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let page = PageParams { page: qq.page, page_size: qq.page_size };
+    let page = PageParams {
+        page: qq.page,
+        page_size: qq.page_size,
+    };
     let (page_no, page_size, offset) = page.resolve();
     let order_sql = match (qq.sort.as_deref(), qq.order.as_deref()) {
         (Some("exchange_integral"), Some("asc")) => "ORDER BY e.exchange_integral ASC",
@@ -423,7 +444,8 @@ pub async fn exchange_goods(
         _ => "ORDER BY e.exchange_integral ASC",
     };
     let rb = state.rb;
-    let mut where_clause = "WHERE e.is_exchange = 1 AND g.is_on_sale = 1 AND g.is_delete = 0".to_string();
+    let mut where_clause =
+        "WHERE e.is_exchange = 1 AND g.is_on_sale = 1 AND g.is_delete = 0".to_string();
     let mut args: Vec<Value> = Vec::new();
     if let Some(cid) = qq.category_id {
         where_clause.push_str(" AND g.cat_id = ?");
@@ -472,7 +494,9 @@ pub async fn exchange_goods(
         })
     })
     .collect::<Vec<_>>();
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "items": items}),
+    ))
 }
 
 /// GET /api/v1/exchange-goods/{id}

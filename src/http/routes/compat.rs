@@ -10,13 +10,17 @@ use crate::http::auth::AuthUser;
 use crate::http::state::AppState;
 use crate::infrastructure::crypto;
 use crate::shared::error::AppError;
-use crate::shared::rbutil::{col_i64, col_str, col_cents, col_bool, col_opt_str, e, insert_id, q, q1};
+use crate::shared::rbutil::{
+    col_bool, col_cents, col_i64, col_opt_str, col_str, e, insert_id, q, q1,
+};
 use crate::shared::util::{cents_to_string, parse_money_cents, unix_now, PageParams};
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
         Ok(v) if v > 0 => Ok(v),
-        _ => Err(AppError::Validation("id must be a positive integer".to_string())),
+        _ => Err(AppError::Validation(
+            "id must be a positive integer".to_string(),
+        )),
     }
 }
 
@@ -184,11 +188,14 @@ pub async fn points_convert(
     Json(body): Json<PointsConversionRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if body.points < 100 {
-        return Err(AppError::Validation("points must be at least 100".to_string()));
+        return Err(AppError::Validation(
+            "points must be at least 100".to_string(),
+        ));
     }
     let now = unix_now();
     let cents = body.points; // 100 points = 1.00 CNY => 1 point = 1 cent.
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let updated = e(
         &tx,
         "UPDATE ecs_users SET pay_points = pay_points - ? WHERE user_id = ? AND pay_points >= ?",
@@ -255,7 +262,9 @@ pub async fn pm_create(
     Json(body): Json<PmCreateRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if body.title.is_empty() || body.content.is_empty() {
-        return Err(AppError::Validation("title and content are required".to_string()));
+        return Err(AppError::Validation(
+            "title and content are required".to_string(),
+        ));
     }
     let now = unix_now();
     let exists = q1(
@@ -352,7 +361,10 @@ pub async fn pick_out(
     State(state): State<AppState>,
     Query(qq): Query<PickOutQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let page = PageParams { page: qq.page, page_size: qq.page_size };
+    let page = PageParams {
+        page: qq.page,
+        page_size: qq.page_size,
+    };
     let (page_no, page_size, offset) = page.resolve();
     let rb = state.rb;
     let cat_ids: Vec<i64> = match &qq.cat_ids {
@@ -416,7 +428,9 @@ pub async fn pick_out(
         })
     })
     .collect::<Vec<_>>();
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "items": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "items": items}),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +472,9 @@ pub async fn wholesale_quote(
     Json(body): Json<WholesaleQuoteRequest>,
 ) -> Result<Json<Value>, AppError> {
     if body.quantity < 1 {
-        return Err(AppError::Validation("quantity must be positive".to_string()));
+        return Err(AppError::Validation(
+            "quantity must be positive".to_string(),
+        ));
     }
     let row = q1(
         state.rb,
@@ -490,7 +506,10 @@ pub async fn wholesale_quote(
 pub async fn captcha_issue(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
     let a = rand::random::<u32>() % 19 + 1;
     let b = rand::random::<u32>() % 19 + 1;
-    let sig = crypto::hmac_sha256_hex(&state.config.payment_callback_secret, format!("{a}+{b}").as_bytes());
+    let sig = crypto::hmac_sha256_hex(
+        &state.config.payment_callback_secret,
+        format!("{a}+{b}").as_bytes(),
+    );
     let challenge = format!("{a}.{b}.{sig}");
     Ok(Json(json!({
         "challenge": challenge,
@@ -519,7 +538,10 @@ pub async fn captcha_verify(
     let b: u32 = parts[1]
         .parse()
         .map_err(|_| AppError::Validation("invalid challenge".to_string()))?;
-    let expected = crypto::hmac_sha256_hex(&state.config.payment_callback_secret, format!("{a}+{b}").as_bytes());
+    let expected = crypto::hmac_sha256_hex(
+        &state.config.payment_callback_secret,
+        format!("{a}+{b}").as_bytes(),
+    );
     if parts[2] != expected {
         return Err(AppError::Validation("invalid challenge".to_string()));
     }
@@ -543,7 +565,10 @@ pub async fn api_compat_search(
     State(state): State<AppState>,
     Query(qq): Query<ApiCompatQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let page = PageParams { page: qq.page, page_size: qq.page_size };
+    let page = PageParams {
+        page: qq.page,
+        page_size: qq.page_size,
+    };
     let (page_no, page_size, offset) = page.resolve();
     let rb = state.rb;
     let keyword = qq.keyword.unwrap_or_default();
@@ -553,7 +578,10 @@ pub async fn api_compat_search(
         where_clause.push_str(" AND goods_name LIKE ? ESCAPE '\\'");
         let escaped = format!(
             "%{}%",
-            keyword.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            keyword
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
         );
         args.push(json!(escaped));
     }
@@ -585,7 +613,9 @@ pub async fn api_compat_search(
         })
     })
     .collect::<Vec<_>>();
-    Ok(Json(json!({"page": page_no, "page_size": page_size, "total": total, "goods": items})))
+    Ok(Json(
+        json!({"page": page_no, "page_size": page_size, "total": total, "goods": items}),
+    ))
 }
 
 // ---------------------------------------------------------------------------

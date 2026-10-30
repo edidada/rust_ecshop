@@ -39,12 +39,74 @@ jobs:
         with:
           python-version: '3.12'
       - name: HTTP and mock integration acceptance
+        env:
+          ECSHOP_PAYMENT_CALLBACK_SECRET: ci-hmac-callback-secret
+          ECSHOP_CHINABANK_KEY: ci-chinabank-md5-key
+          ECSHOP_ALIPAY_KEY: ci-alipay-md5-key
+          ECSHOP_ALIPAY_PARTNER: ci-partner-001
+          ECSHOP_ALIPAY_ACCOUNT: seller@example.test
         run: python scripts/http_acceptance.py
       - name: Upload HTTP evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: http-evidence-${{ matrix.os }}
+          path: |
+            target/http-server.log
+            target/http-results.json
+
+  mysql:
+    name: MySQL 8 runtime acceptance
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: rust_ecshop
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --all-targets
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build
+        run: cargo build
+      - name: Test
+        run: cargo test --all-targets
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install MySQL connector
+        run: pip install mysql-connector-python
+      - name: MySQL migration, connector seed and HTTP acceptance
+        env:
+          ECSHOP_DATABASE_URL: mysql://root:ci-root-password@127.0.0.1:3306/rust_ecshop
+          ECSHOP_AUTO_MIGRATE: '1'
+          ECSHOP_INTEGRATION_MODE: mock
+          ECSHOP_ENV: test
+          ECSHOP_PAYMENT_CALLBACK_SECRET: ci-hmac-callback-secret
+          ECSHOP_CHINABANK_KEY: ci-chinabank-md5-key
+          ECSHOP_ALIPAY_KEY: ci-alipay-md5-key
+          ECSHOP_ALIPAY_PARTNER: ci-partner-001
+          ECSHOP_ALIPAY_ACCOUNT: seller@example.test
+        run: python scripts/http_acceptance.py
+      - name: Upload MySQL HTTP evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: http-evidence-mysql
           path: |
             target/http-server.log
             target/http-results.json

@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 
 pub async fn clear(State(state): State<AppState>, auth: AuthUser) -> Result<StatusCode, AppError> {
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     e(
         &tx,
         "DELETE FROM ecs_cart WHERE user_id = ?",
@@ -27,6 +28,12 @@ pub async fn clear(State(state): State<AppState>, auth: AuthUser) -> Result<Stat
     e(
         &tx,
         "DELETE FROM ecs_cart_offer WHERE user_id=?",
+        vec![json!(auth.user_id)],
+    )
+    .await?;
+    e(
+        &tx,
+        "DELETE FROM ecs_cart_gift WHERE user_id=?",
         vec![json!(auth.user_id)],
     )
     .await?;
@@ -41,6 +48,7 @@ pub async fn collect(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, AppError> {
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let row = q1(
         &tx,
         "SELECT goods_id AS goods_id FROM ecs_cart WHERE rec_id = ? AND user_id = ?",
@@ -144,6 +152,7 @@ pub async fn select(
         super::mock::enabled()?;
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     e(
         &tx,
         "INSERT OR IGNORE INTO ecs_checkout_selection(user_id) VALUES(?)",
@@ -189,6 +198,7 @@ pub struct Adjustment {
     pub balance: i64,
     pub points: i64,
     pub bonus_id: i64,
+    pub offer_id: i64,
     pub snapshot: Value,
 }
 
@@ -196,8 +206,9 @@ pub async fn adjustments<E: Executor>(
     tx: &E,
     user: i64,
     goods: i64,
+    rows: &[Value],
 ) -> Result<Adjustment, AppError> {
-    let offer_discount = offer_discount(tx, user, goods).await?;
+    let offer = offer_discount(tx, user, goods, rows).await?;
     let Some(row) = q1(
         tx,
         "SELECT * FROM ecs_checkout_selection WHERE user_id = ?",
@@ -206,7 +217,8 @@ pub async fn adjustments<E: Executor>(
     .await?
     else {
         return Ok(Adjustment {
-            discount: offer_discount,
+            discount: offer.discount,
+            offer_id: offer.act_id,
             ..Adjustment::default()
         });
     };
@@ -231,8 +243,13 @@ pub async fn adjustments<E: Executor>(
     }
     let points = col_i64(&row, "integral");
     let bonus_id = col_i64(&row, "bonus_id");
-    let discount = bonus(tx, user, bonus_id, goods).await?;
-    if points > goods - discount {
+    let bonus = bonus(tx, user, bonus_id, goods).await?;
+    // Bonus, points and offer discount stack in this order, capped by the
+    // applicable goods amount so the payable amount can never go negative.
+    let combined = bonus
+        .checked_add(offer.discount)
+        .ok_or_else(|| AppError::Validation("amount overflow".into()))?;
+    if points > goods - combined {
         return Err(AppError::Validation("points exceed goods amount".into()));
     }
     let available = q1(
@@ -249,12 +266,17 @@ pub async fn adjustments<E: Executor>(
     if col_i64(&row, "insure") == 1 {
         super::mock::enabled()?;
     }
+    let discount = combined
+        .checked_add(points)
+        .and_then(|v| v.checked_min(goods))
+        .ok_or_else(|| AppError::Validation("amount overflow".into()))?;
     Ok(Adjustment {
         extra,
-        discount: discount + points + offer_discount,
+        discount,
         balance: col_i64(&row, "surplus_cents"),
         points,
         bonus_id,
+        offer_id: offer.act_id,
         snapshot: row,
     })
 }
@@ -313,6 +335,12 @@ pub async fn apply<E: Executor>(
     .await?;
     e(
         tx,
+        "DELETE FROM ecs_cart_gift WHERE user_id=?",
+        vec![json!(user)],
+    )
+    .await?;
+    e(
+        tx,
         "DELETE FROM ecs_checkout_selection WHERE user_id=?",
         vec![json!(user)],
     )
@@ -347,6 +375,7 @@ pub async fn linked_buy(
         return Err(AppError::Validation("quantity must be 1-999".into()));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let goods=q1(&tx,"SELECT goods_id FROM ecs_goods WHERE goods_id=? AND goods_number>=? AND is_on_sale=1 AND is_delete=0",vec![json!(body.goods_id),json!(body.quantity)]).await?;
     if goods.is_none() {
         return Err(AppError::Conflict("goods unavailable".into()));
@@ -360,6 +389,12 @@ pub async fn linked_buy(
     e(
         &tx,
         "DELETE FROM ecs_cart_offer WHERE user_id=?",
+        vec![json!(auth.user_id)],
+    )
+    .await?;
+    e(
+        &tx,
+        "DELETE FROM ecs_cart_gift WHERE user_id=?",
         vec![json!(auth.user_id)],
     )
     .await?;
@@ -390,6 +425,7 @@ pub async fn package(
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, AppError> {
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let now = unix_now();
     if q1(&tx,"SELECT act_id FROM ecs_goods_activity WHERE act_id=? AND act_type=4 AND is_finished=0 AND start_time<=? AND end_time>?",vec![json!(id),json!(now),json!(now)]).await?.is_none(){return Err(AppError::NotFound("active package not found".into()));}
     let rows=q(&tx,"SELECT p.goods_id AS goods_id,p.goods_number AS quantity,p.product_id AS product_id,g.goods_number AS stock,g.is_on_sale AS sale,g.is_delete AS deleted FROM ecs_package_goods p JOIN ecs_goods g ON g.goods_id=p.goods_id WHERE p.package_id=?",vec![json!(id)]).await?;
@@ -428,6 +464,12 @@ pub async fn package(
     e(&tx,"INSERT INTO ecs_cart_offer(user_id,package_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET package_id=excluded.package_id,favourable_id=0",vec![json!(auth.user_id),json!(id)]).await?;
     e(
         &tx,
+        "DELETE FROM ecs_cart_gift WHERE user_id=?",
+        vec![json!(auth.user_id)],
+    )
+    .await?;
+    e(
+        &tx,
         "DELETE FROM ecs_cart_spec WHERE user_id=?",
         vec![json!(auth.user_id)],
     )
@@ -440,31 +482,229 @@ pub async fn favourable(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<i64>,
+    Json(body): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
     let now = unix_now();
+    let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let offer = q1(
-        state.rb,
+        &tx,
         "SELECT * FROM ecs_favourable_activity WHERE act_id=? AND start_time<=? AND end_time>?",
         vec![json!(id), json!(now), json!(now)],
     )
     .await?
     .ok_or_else(|| AppError::NotFound("active offer not found".into()))?;
-    // Only global offers available to all ranks; scoped/rank offers require migrated membership rules.
-    if col_i64(&offer, "act_range") != 0
-        || !crate::shared::rbutil::col_str(&offer, "user_rank")
-            .split(',')
-            .any(|r| r == "0")
-        || col_i64(&offer, "act_type") == 0
-    {
-        return Err(AppError::Validation(
-            "offer requires unsupported gift/rank/range rules".into(),
-        ));
+    let act_type = col_i64(&offer, "act_type");
+    if !(0..=2).contains(&act_type) {
+        return Err(AppError::Validation("unsupported offer type".into()));
     }
-    e(state.rb,"INSERT INTO ecs_cart_offer(user_id,favourable_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET favourable_id=excluded.favourable_id,package_id=0",vec![json!(auth.user_id),json!(id)]).await?;
-    Ok(Json(json!({"favourable_id":id})))
+    // The offer's user_rank is an explicit list (0 = normal member).
+    require_rank(&offer, super::pricing::user_rank(&tx, auth.user_id).await?)?;
+    let gifts: Vec<GiftSelection> = body
+        .get("gifts")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| AppError::Validation("gifts must be a list".into()))?
+        .unwrap_or_default();
+    if act_type == 0 {
+        sync_gifts(&tx, auth.user_id, id, &gifts).await?;
+    } else if !gifts.is_empty() {
+        return Err(AppError::Validation(
+            "gifts apply only to gift offers".into(),
+        ));
+    } else {
+        e(
+            &tx,
+            "DELETE FROM ecs_cart_gift WHERE user_id=?",
+            vec![json!(auth.user_id)],
+        )
+        .await?;
+    }
+    e(
+        &tx,
+        "INSERT INTO ecs_cart_offer(user_id,favourable_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET favourable_id=excluded.favourable_id,package_id=0",
+        vec![json!(auth.user_id), json!(id)],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"favourable_id": id})))
 }
 
-async fn offer_discount<E: Executor>(tx: &E, user: i64, goods: i64) -> Result<i64, AppError> {
+/// The offer's user_rank is an explicit rank list; 0 denotes the normal member.
+/// Users outside the list cannot select or benefit from the offer.
+fn require_rank(offer: &Value, rank: i64) -> Result<(), AppError> {
+    let allowed: Vec<i64> = crate::shared::rbutil::col_str(offer, "user_rank")
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
+    if allowed.contains(&rank) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GiftSelection {
+    goods_id: i64,
+    quantity: i64,
+}
+
+/// Validate gift selections against the offer's gift allow-list and stock, then
+/// persist them for the cart. Zero-amount gifts never accept client prices.
+async fn sync_gifts<E: Executor>(
+    tx: &E,
+    user: i64,
+    offer_id: i64,
+    gifts: &[GiftSelection],
+) -> Result<(), AppError> {
+    let Some(offer) = q1(
+        tx,
+        "SELECT gift,act_type_ext FROM ecs_favourable_activity WHERE act_id=?",
+        vec![json!(offer_id)],
+    )
+    .await?
+    else {
+        return Err(AppError::NotFound("active offer not found".into()));
+    };
+    let config: Value = serde_json::from_str(&crate::shared::rbutil::col_str(&offer, "gift"))
+        .map_err(|_| AppError::InvalidState("offer gift config must be JSON".into()))?;
+    let allowed: Vec<i64> = config
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|g| g.get("id").and_then(Value::as_i64))
+                .collect()
+        })
+        .unwrap_or_default();
+    let limit = col_i64(&offer, "act_type_ext");
+    if limit <= 0 {
+        return Err(AppError::Validation("offer allows no gifts".into()));
+    }
+    let mut total = 0i64;
+    let mut seen = std::collections::BTreeSet::new();
+    for gift in gifts {
+        if !seen.insert(gift.goods_id) {
+            return Err(AppError::Validation("duplicate gift goods".into()));
+        }
+        if !allowed.contains(&gift.goods_id) {
+            return Err(AppError::Validation("gift goods not in allow-list".into()));
+        }
+        if !(1..=999).contains(&gift.quantity) {
+            return Err(AppError::Validation("gift quantity must be 1-999".into()));
+        }
+        total += gift.quantity;
+    }
+    if total > limit {
+        return Err(AppError::Validation(
+            "gift quantity exceeds the offer limit".into(),
+        ));
+    }
+    for gift in gifts {
+        if q1(
+            tx,
+            "SELECT goods_id AS ok FROM ecs_goods WHERE goods_id=? AND is_on_sale=1 AND is_delete=0 AND goods_number>=?",
+            vec![json!(gift.goods_id), json!(gift.quantity)],
+        )
+        .await?
+        .is_none()
+        {
+            return Err(AppError::Conflict("gift goods unavailable".into()));
+        }
+    }
+    e(
+        tx,
+        "DELETE FROM ecs_cart_gift WHERE user_id=?",
+        vec![json!(user)],
+    )
+    .await?;
+    for gift in gifts {
+        e(
+            tx,
+            "INSERT INTO ecs_cart_gift(user_id,goods_id,quantity) VALUES(?,?,?)",
+            vec![json!(user), json!(gift.goods_id), json!(gift.quantity)],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn parse_id_list(text: &str) -> Vec<i64> {
+    text.split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect()
+}
+
+/// PHP FAR_* range constants: 0 all, 1 category, 2 brand, 3 goods.
+const FAR_ALL: i64 = 0;
+const FAR_CATEGORY: i64 = 1;
+const FAR_BRAND: i64 = 2;
+const FAR_GOODS: i64 = 3;
+
+fn good_matches_range(
+    range: i64,
+    ext_ids: &[i64],
+    allowed: &[i64],
+    goods_id: i64,
+    cat_id: i64,
+    brand_id: i64,
+) -> bool {
+    match range {
+        FAR_ALL => true,
+        FAR_CATEGORY => allowed.contains(&cat_id),
+        FAR_BRAND => allowed.contains(&brand_id),
+        FAR_GOODS => ext_ids.contains(&goods_id),
+        _ => false,
+    }
+}
+
+/// Category matching includes descendants of the seeded categories (depth-limited).
+async fn expand_categories<E: Executor>(tx: &E, seeds: &[i64]) -> Result<Vec<i64>, AppError> {
+    let rows = q(
+        tx,
+        "SELECT cat_id AS cat_id, parent_id AS parent_id FROM ecs_category",
+        vec![],
+    )
+    .await?;
+    let mut children: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    for row in &rows {
+        children
+            .entry(col_i64(row, "parent_id"))
+            .or_default()
+            .push(col_i64(row, "cat_id"));
+    }
+    let mut queue: std::collections::VecDeque<(i64, i64)> =
+        seeds.iter().map(|id| (*id, 0i64)).collect();
+    let mut seen: std::collections::BTreeSet<i64> = seeds.iter().copied().collect();
+    while let Some((cat, depth)) = queue.pop_front() {
+        if depth >= 10 {
+            continue;
+        }
+        if let Some(kids) = children.get(&cat) {
+            for kid in kids {
+                if seen.insert(*kid) {
+                    queue.push_back((*kid, depth + 1));
+                }
+            }
+        }
+    }
+    Ok(seen.into_iter().collect())
+}
+
+/// Discount produced by the selected offer for the current cart contents.
+pub struct OfferDiscount {
+    pub discount: i64,
+    pub act_id: i64,
+}
+
+async fn offer_discount<E: Executor>(
+    tx: &E,
+    user: i64,
+    goods: i64,
+    rows: &[Value],
+) -> Result<OfferDiscount, AppError> {
     let Some(offer) = q1(
         tx,
         "SELECT * FROM ecs_cart_offer WHERE user_id=?",
@@ -472,7 +712,10 @@ async fn offer_discount<E: Executor>(tx: &E, user: i64, goods: i64) -> Result<i6
     )
     .await?
     else {
-        return Ok(0);
+        return Ok(OfferDiscount {
+            discount: 0,
+            act_id: 0,
+        });
     };
     let now = unix_now();
     let package = col_i64(&offer, "package_id");
@@ -500,11 +743,18 @@ async fn offer_discount<E: Executor>(tx: &E, user: i64, goods: i64) -> Result<i6
                 .unwrap_or(""),
             "package_price",
         )?;
-        return Ok(goods - price); // Negative discount represents bundle markup.
+        // Negative discount represents bundle markup.
+        return Ok(OfferDiscount {
+            discount: goods - price,
+            act_id: 0,
+        });
     }
     let id = col_i64(&offer, "favourable_id");
     if id == 0 {
-        return Ok(0);
+        return Ok(OfferDiscount {
+            discount: 0,
+            act_id: 0,
+        });
     }
     let a = q1(
         tx,
@@ -513,26 +763,66 @@ async fn offer_discount<E: Executor>(tx: &E, user: i64, goods: i64) -> Result<i6
     )
     .await?
     .ok_or_else(|| AppError::Conflict("offer expired".into()))?;
-    if goods < col_cents(&a, "min_amount")
-        || (col_cents(&a, "max_amount") > 0 && goods > col_cents(&a, "max_amount"))
-    {
+    require_rank(&a, super::pricing::user_rank(tx, user).await?)?;
+    let range = col_i64(&a, "act_range");
+    let ext_ids = parse_id_list(&crate::shared::rbutil::col_str(&a, "act_range_ext"));
+    let allowed = if range == FAR_CATEGORY {
+        expand_categories(tx, &ext_ids).await?
+    } else {
+        ext_ids.clone()
+    };
+    let mut applicable = 0i64;
+    for row in rows {
+        let matched = good_matches_range(
+            range,
+            &ext_ids,
+            &allowed,
+            col_i64(row, "goods_id"),
+            col_i64(row, "cat_id"),
+            col_i64(row, "brand_id"),
+        );
+        if !matched {
+            continue;
+        }
+        let price = col_cents(row, "shop_price");
+        let quantity = col_i64(row, "goods_number");
+        applicable = applicable
+            .checked_add(
+                price
+                    .checked_mul(quantity)
+                    .ok_or_else(|| AppError::Validation("amount overflow".into()))?,
+            )
+            .ok_or_else(|| AppError::Validation("amount overflow".into()))?;
+    }
+    let min_amount = col_cents(&a, "min_amount");
+    let max_amount = col_cents(&a, "max_amount");
+    if applicable < min_amount || (max_amount > 0 && applicable > max_amount) {
         return Err(AppError::Conflict("offer amount outside limits".into()));
     }
     match col_i64(&a, "act_type") {
-        1 => Ok(col_cents(&a, "act_type_ext").min(goods)),
+        1 => Ok(OfferDiscount {
+            discount: col_cents(&a, "act_type_ext").min(applicable),
+            act_id: id,
+        }),
         2 => {
             let percent = col_cents(&a, "act_type_ext");
             if !(0..=10000).contains(&percent) {
                 return Err(AppError::InvalidState("invalid discount percentage".into()));
             }
-            Ok(goods
-                - goods
-                    .checked_mul(percent)
-                    .ok_or_else(|| AppError::Validation("amount overflow".into()))?
-                    / 10000)
+            let pay = applicable
+                .checked_mul(percent)
+                .ok_or_else(|| AppError::Validation("amount overflow".into()))?
+                / 10000;
+            Ok(OfferDiscount {
+                discount: (applicable - pay).min(applicable),
+                act_id: id,
+            })
         }
-        _ => Err(AppError::Validation(
-            "gift offer requires gift selection".into(),
-        )),
+        // FAT_GOODS: gifts are granted free of charge and re-validated at order time.
+        0 => Ok(OfferDiscount {
+            discount: 0,
+            act_id: id,
+        }),
+        _ => Err(AppError::Validation("unsupported offer type".into())),
     }
 }

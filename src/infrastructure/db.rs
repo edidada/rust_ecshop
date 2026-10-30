@@ -1,6 +1,19 @@
 //! rbatis pool bootstrap: supports SQLite (dev) and MySQL (production) through one API.
 
 use once_cell::sync::OnceCell;
+use rbatis::executor::Executor;
+use std::sync::atomic::{AtomicBool, Ordering};
+static MYSQL: AtomicBool = AtomicBool::new(false);
+pub fn is_mysql() -> bool {
+    MYSQL.load(Ordering::Relaxed)
+}
+pub fn sql(statement: &str) -> String {
+    if is_mysql() {
+        super::dialect::mysql(statement)
+    } else {
+        statement.to_string()
+    }
+}
 use rbatis::rbatis::RBatis;
 use rbdc_mysql::driver::MysqlDriver;
 use rbdc_sqlite::driver::SqliteDriver;
@@ -48,9 +61,12 @@ pub async fn init(database_url: &str) -> Result<&'static RBatis, String> {
                 .await
                 .map_err(|e| format!("bootstrap sqlite schema failed: {e}"))?;
         } else if database_url.starts_with("mysql://") {
+            MYSQL.store(true, Ordering::Relaxed);
             rb.init(MysqlDriver {}, database_url)
                 .map_err(|e| format!("init mysql pool failed: {e}"))?;
-            tracing::warn!("mysql: expect ecs_* schema to be provisioned by DBA/migration tooling");
+            bootstrap_mysql(&rb)
+                .await
+                .map_err(|e| format!("mysql migration failed: {e}"))?;
         } else {
             return Err(format!("unsupported database url: {database_url}"));
         }
@@ -74,6 +90,9 @@ async fn bootstrap_sqlite_schema(rb: &RBatis) -> Result<(), rbatis::Error> {
     for stmt in split_statements(include_str!("../../docs/sql/sqlite/003_checkout.sql")) {
         rb.exec(&stmt, vec![]).await?;
     }
+    for stmt in split_statements(include_str!("../../docs/sql/sqlite/004_rules.sql")) {
+        rb.exec(&stmt, vec![]).await?;
+    }
     // The dev schema lacks a few columns the API surface expects; add them
     // idempotently (ALTER TABLE errors are ignored when the column exists).
     for stmt in [
@@ -85,6 +104,73 @@ async fn bootstrap_sqlite_schema(rb: &RBatis) -> Result<(), rbatis::Error> {
             tracing::debug!("schema bootstrap (expected when column exists): {e}");
         }
     }
+    Ok(())
+}
+
+async fn bootstrap_mysql(rb: &RBatis) -> Result<(), rbatis::Error> {
+    let conn = rb.acquire().await?;
+    if std::env::var("ECSHOP_AUTO_MIGRATE").as_deref() == Ok("1") {
+        conn.exec("CREATE TABLE IF NOT EXISTS ecs_schema_migrations(version BIGINT PRIMARY KEY, applied_at BIGINT NOT NULL)",vec![]).await?;
+        let locked = crate::shared::rbutil::q1(
+            &conn,
+            "SELECT GET_LOCK('rust_ecshop_schema',30) AS acquired",
+            vec![],
+        )
+        .await
+        .map_err(|e| rbatis::Error::from(e.to_string()))?;
+        if locked
+            .as_ref()
+            .map(|r| crate::shared::rbutil::col_i64(r, "acquired"))
+            != Some(1)
+        {
+            return Err(rbatis::Error::from(
+                "schema migration lock timeout".to_string(),
+            ));
+        }
+        let result=async {
+            let rows=conn.query("SELECT version FROM ecs_schema_migrations WHERE version=1",vec![]).await?;
+            if rows.as_array().is_none_or(|r|r.is_empty()) {
+                for stmt in split_statements(include_str!("../../docs/sql/mysql/001_runtime.sql")) {conn.exec(&stmt,vec![]).await?;}
+                conn.exec("INSERT INTO ecs_schema_migrations(version,applied_at) VALUES(1,UNIX_TIMESTAMP())",vec![]).await?;
+            }
+            Ok::<(),rbatis::Error>(())
+        }.await;
+        let _ = conn
+            .exec("SELECT RELEASE_LOCK('rust_ecshop_schema')", vec![])
+            .await;
+        result?;
+    }
+    let rows = conn
+        .query(
+            "SELECT version FROM ecs_schema_migrations WHERE version=1",
+            vec![],
+        )
+        .await?;
+    if rows.as_array().is_none_or(|r| r.is_empty()) {
+        return Err(rbatis::Error::from(
+            "runtime schema version 1 is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Serialize an authenticated user's transactional writes across pools and backends.
+pub async fn lock_user<E: Executor>(
+    tx: &E,
+    user: i64,
+) -> Result<(), crate::shared::error::AppError> {
+    crate::shared::rbutil::e(
+        tx,
+        "INSERT OR IGNORE INTO ecs_user_write_lock(user_id) VALUES(?)",
+        vec![serde_json::json!(user)],
+    )
+    .await?;
+    crate::shared::rbutil::e(
+        tx,
+        "UPDATE ecs_user_write_lock SET version=version+1 WHERE user_id=?",
+        vec![serde_json::json!(user)],
+    )
+    .await?;
     Ok(())
 }
 

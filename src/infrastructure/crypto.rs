@@ -86,6 +86,38 @@ pub fn verify_hmac_sha256_hex(secret: &str, data: &[u8], signature: &str) -> boo
     mac.verify_slice(&bytes).is_ok()
 }
 
+/// Lowercase MD5 hex digest, used only to reproduce legacy payment protocols
+/// (Chinabank and Alipay MD5) with their original signature rules.
+pub fn md5_hex(data: &[u8]) -> String {
+    use md5::Digest;
+    let mut hasher = md5::Md5::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+/// Case-insensitive constant-time comparison for hex signature strings.
+/// Legacy PHP gateways transmitted both cases depending on the plugin.
+pub fn eq_hex_ignore_case(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= to_lower_ascii(*x) ^ to_lower_ascii(*y);
+    }
+    diff == 0
+}
+
+fn to_lower_ascii(b: u8) -> u8 {
+    if b.is_ascii_uppercase() {
+        b + 32
+    } else {
+        b
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +162,19 @@ mod tests {
             hmac_sha256_hex("key", b"The quick brown fox jumps over the lazy dog"),
             "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
         );
+    }
+
+    #[test]
+    fn md5_hex_matches_known_vector() {
+        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    #[test]
+    fn eq_hex_ignore_case_compares_constant_time() {
+        assert!(eq_hex_ignore_case("ABCDEF", "abcdef"));
+        assert!(eq_hex_ignore_case("AbCdEf", "aBcDeF"));
+        assert!(!eq_hex_ignore_case("ABCDEE", "abcdef"));
+        assert!(!eq_hex_ignore_case("ABCDEF", "abcde"));
     }
 }

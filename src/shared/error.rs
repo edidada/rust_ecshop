@@ -40,11 +40,9 @@ impl IntoResponse for AppError {
             ),
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
-            AppError::InvalidState(m) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_state",
-                m.clone(),
-            ),
+            AppError::InvalidState(m) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "invalid_state", m.clone())
+            }
             AppError::Internal(e) => {
                 tracing::error!("internal error: {e:#}");
                 (

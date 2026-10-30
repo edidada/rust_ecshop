@@ -246,6 +246,7 @@ pub async fn me_patch(
         }
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     if let Some(email) = &body.email {
         let conflict = q1(
             &tx,
@@ -304,6 +305,7 @@ pub async fn me_password_patch(
     validate_password(&body.new_password)?;
     let new_hash = crypto::hash_password(&body.new_password);
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let row = q1(
         &tx,
         "SELECT password_hash AS password_hash FROM ecs_users WHERE user_id = ?",

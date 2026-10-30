@@ -60,6 +60,7 @@ pub async fn address_create(
         ));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     for (level, rid) in [
         ("country", body.country_id),
         ("province", body.province_id),
@@ -151,6 +152,7 @@ pub async fn address_update(
 ) -> Result<StatusCode, AppError> {
     let address_id = parse_id(&id)?;
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     if body.is_default {
         e(
             &tx,
@@ -226,6 +228,7 @@ pub async fn favorite_create(
         ));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let ok = q1(
         &tx,
         "SELECT COUNT(*) AS cnt FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
@@ -378,6 +381,7 @@ pub async fn booking_create(
         ));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let ok = q1(
         &tx,
         "SELECT COUNT(*) AS cnt FROM ecs_goods WHERE goods_id = ? AND is_on_sale = 1 AND is_delete = 0",
@@ -497,6 +501,7 @@ pub async fn bonus_claim(
         .map_err(|_| AppError::Validation("bonus_sn is out of range".to_string()))?;
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let row = q1(
         &tx,
         "SELECT b.bonus_id AS bonus_id, t.use_end_date AS use_end_date
@@ -579,6 +584,7 @@ pub async fn email_verification_request(
     let token_hash = crypto::sha256_hex(token.as_bytes());
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let email = q1(
         &tx,
         "SELECT email AS email FROM ecs_users WHERE user_id = ?",
@@ -933,6 +939,7 @@ pub async fn account_request_create(
     }
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let status = match body.kind.as_str() {
         "deposit" => {
             let pid = body.payment_id.ok_or_else(|| {
@@ -1051,6 +1058,7 @@ pub async fn account_request_cancel(
     let rec_id = parse_id(&id)?;
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let row = q1(
         &tx,
         "SELECT process_type AS process_type, amount_cents AS amount_cents FROM ecs_user_account
@@ -1103,6 +1111,7 @@ pub async fn account_request_payment(
     let rec_id = parse_id(&id)?;
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
+    crate::infrastructure::db::lock_user(&tx, auth.user_id).await?;
     let row = q1(
         &tx,
         "SELECT amount_cents AS amount_cents FROM ecs_user_account
