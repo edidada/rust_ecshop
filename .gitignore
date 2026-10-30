@@ -6,3 +6,8 @@ logs/
 data/
 .idea
 *.iml
+# macOS metadata
+.DS_Store
+._*
+.AppleDouble/
+.LSOverride
