@@ -96,6 +96,31 @@ def md5_hex(text):
     return hashlib.md5(text.encode()).hexdigest()
 
 
+def apply_fixture_seed():
+    """The MySQL runtime migration is business-agnostic; the CI fixtures
+    (regions, shipping, payments, seeded goods and activities) ride through
+    the connector like every other seed."""
+    if not DATABASE_URL.startswith("mysql:"):
+        return
+    source = (ROOT / "docs/sql/mysql/ci_seed.sql").read_text(encoding="utf-8-sig")
+    statement, quoted = [], False
+    with mysql_connect() as connection:
+        cursor = connection.cursor()
+        for char in source:
+            if char == "'":
+                quoted = not quoted
+            if char == ";" and not quoted:
+                text = "".join(statement).strip()
+                if text:
+                    cursor.execute(text)
+                statement = []
+            else:
+                statement.append(char)
+        text = "".join(statement).strip()
+        if text:
+            cursor.execute(text)
+
+
 def run_legacy_payments(aid, uid):
     """Chinabank/Alipay MD5 adapters against server-side payment intents.
 
@@ -227,6 +252,7 @@ def run_legacy_payments(aid, uid):
 
 def run():
     global TOKEN
+    apply_fixture_seed()
     register = request("POST", "/api/v1/auth/register", {"username": "acceptance", "email": "acceptance@example.test", "password": "acceptance-password", "agreement_accepted": True}, 201)
     TOKEN = register["access_token"]
     uid = register["user_id"]
