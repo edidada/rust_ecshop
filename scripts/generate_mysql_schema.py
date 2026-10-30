@@ -22,6 +22,16 @@ def convert(sql):
     sql=re.sub(r'BIGINT PRIMARY KEY(?! AUTO_INCREMENT)', 'BIGINT PRIMARY KEY AUTO_INCREMENT',sql)
     sql=sql.replace('(unixepoch())','(UNIX_TIMESTAMP())')
     sql=sql.replace('tag_words TEXT','tag_words VARCHAR(191)')
+    if sql.startswith('CREATE TABLE'):
+        # MySQL cannot index TEXT/BLOB columns without a key length; promote
+        # TEXT columns participating in PRIMARY KEY/UNIQUE to VARCHAR(190).
+        keys=set()
+        for fragment in re.findall(r'(?:PRIMARY KEY|UNIQUE)\s*\(([^()]*)\)', sql):
+            for column in fragment.split(','):
+                name=column.strip().split(' ')[0].strip()
+                if name:keys.add(name)
+        for column in keys:
+            sql=re.sub(rf'\b({re.escape(column)})\s+TEXT\b',r'\1 VARCHAR(190)',sql)
     sql=re.sub(r'\bTEXT\b','LONGTEXT',sql)
     # MySQL requires expression syntax for defaults on TEXT/BLOB columns.
     sql=re.sub(r"(LONGTEXT(?: NOT NULL)? DEFAULT) ('[^']*')",r'\1 (\2)',sql)
