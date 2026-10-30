@@ -12,14 +12,16 @@ use crate::http::state::AppState;
 use crate::infrastructure::crypto;
 use crate::shared::error::AppError;
 use crate::shared::rbutil::{
-    col_bool, col_i64, col_opt_i64, col_str, col_cents, e, insert_id, q, q1,
+    col_bool, col_cents, col_i64, col_opt_i64, col_str, e, insert_id, q, q1,
 };
 use crate::shared::util::{cents_to_string, parse_money_cents, unix_now};
 
 fn parse_id(id: &str) -> Result<i64, AppError> {
     match id.parse::<i64>() {
         Ok(v) if v > 0 => Ok(v),
-        _ => Err(AppError::Validation("id must be a positive integer".to_string())),
+        _ => Err(AppError::Validation(
+            "id must be a positive integer".to_string(),
+        )),
     }
 }
 
@@ -53,7 +55,9 @@ pub async fn address_create(
     Json(body): Json<AddressRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if body.consignee.is_empty() || body.address.is_empty() || body.mobile.is_empty() {
-        return Err(AppError::Validation("consignee/address/mobile are required".to_string()));
+        return Err(AppError::Validation(
+            "consignee/address/mobile are required".to_string(),
+        ));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
     for (level, rid) in [
@@ -217,7 +221,9 @@ pub async fn favorite_create(
     Json(body): Json<FavoriteCreateRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if body.goods_id <= 0 {
-        return Err(AppError::Validation("goods_id must be positive".to_string()));
+        return Err(AppError::Validation(
+            "goods_id must be positive".to_string(),
+        ));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
     let ok = q1(
@@ -362,10 +368,14 @@ pub async fn booking_create(
     Json(body): Json<BookingCreateRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if body.goods_id <= 0 {
-        return Err(AppError::Validation("goods_id must be positive".to_string()));
+        return Err(AppError::Validation(
+            "goods_id must be positive".to_string(),
+        ));
     }
     if body.goods_number < 1 {
-        return Err(AppError::Validation("goods_number must be at least 1".to_string()));
+        return Err(AppError::Validation(
+            "goods_number must be at least 1".to_string(),
+        ));
     }
     let tx = crate::infrastructure::db::begin(state.rb).await?;
     let ok = q1(
@@ -401,7 +411,9 @@ pub async fn booking_create(
         Err(err) => {
             let msg = err.to_string();
             if msg.contains("UNIQUE") || msg.contains("unique") {
-                return Err(AppError::Conflict("booking already exists for this goods".to_string()));
+                return Err(AppError::Conflict(
+                    "booking already exists for this goods".to_string(),
+                ));
             }
             return Err(err);
         }
@@ -476,7 +488,9 @@ pub async fn bonus_claim(
 ) -> Result<StatusCode, AppError> {
     let sn = body.bonus_sn.trim().to_string();
     if sn.is_empty() || sn.len() > 20 || !sn.chars().all(|c| c.is_ascii_digit()) {
-        return Err(AppError::Validation("bonus_sn must be 1-20 digit string".to_string()));
+        return Err(AppError::Validation(
+            "bonus_sn must be 1-20 digit string".to_string(),
+        ));
     }
     let sn_value: i64 = sn
         .parse()
@@ -590,7 +604,14 @@ pub async fn email_verification_request(
         ],
     )
     .await?;
-    insert_outbox(&tx, Some(auth.user_id), &email, "verify_email", &json!({"token": token})).await?;
+    insert_outbox(
+        &tx,
+        Some(auth.user_id),
+        &email,
+        "verify_email",
+        &json!({"token": token}),
+    )
+    .await?;
     tx.commit().await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "queued"}))))
 }
@@ -606,7 +627,9 @@ pub async fn email_verification_confirm(
     Json(body): Json<TokenConfirmRequest>,
 ) -> Result<StatusCode, AppError> {
     if body.token.len() != 64 {
-        return Err(AppError::Validation("token must be 64 hex chars".to_string()));
+        return Err(AppError::Validation(
+            "token must be 64 hex chars".to_string(),
+        ));
     }
     let token_hash = crypto::sha256_hex(body.token.as_bytes());
     let now = unix_now();
@@ -683,7 +706,14 @@ pub async fn password_reset_request(
             vec![json!(user_id), json!(token_hash), json!(now + 3_600), json!(now)],
         )
         .await?;
-        insert_outbox(&tx, Some(user_id), &body.email, "password_reset", &json!({"token": token})).await?;
+        insert_outbox(
+            &tx,
+            Some(user_id),
+            &body.email,
+            "password_reset",
+            &json!({"token": token}),
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "accepted"}))))
@@ -702,7 +732,9 @@ pub async fn password_reset_confirm(
 ) -> Result<StatusCode, AppError> {
     let len = body.new_password.len();
     if !(8..=1024).contains(&len) {
-        return Err(AppError::Validation("password must be 8-1024 bytes".to_string()));
+        return Err(AppError::Validation(
+            "password must be 8-1024 bytes".to_string(),
+        ));
     }
     let token_hash = crypto::sha256_hex(body.token.as_bytes());
     let new_hash = crypto::hash_password(&body.new_password);
@@ -768,7 +800,9 @@ async fn newsletter_action(
     action: &str,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     if email.is_empty() || email.len() > 120 {
-        return Err(AppError::Validation("email must be 1-120 bytes".to_string()));
+        return Err(AppError::Validation(
+            "email must be 1-120 bytes".to_string(),
+        ));
     }
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
@@ -806,10 +840,27 @@ async fn newsletter_action(
             .await?;
         }
     }
-    let template = if action == "subscribe" { "newsletter_subscribe" } else { "newsletter_unsubscribe" };
+    let template = if action == "subscribe" {
+        "newsletter_subscribe"
+    } else {
+        "newsletter_unsubscribe"
+    };
     insert_outbox(&tx, None, &email, template, &json!({"token": token})).await?;
     tx.commit().await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "accepted"}))))
+}
+
+pub async fn newsletter_subscription_confirm(
+    State(state): State<AppState>,
+    Json(body): Json<TokenConfirmRequest>,
+) -> Result<StatusCode, AppError> {
+    newsletter_confirm(State(state), Path("subscriptions".into()), Json(body)).await
+}
+pub async fn newsletter_unsubscription_confirm(
+    State(state): State<AppState>,
+    Json(body): Json<TokenConfirmRequest>,
+) -> Result<StatusCode, AppError> {
+    newsletter_confirm(State(state), Path("unsubscriptions".into()), Json(body)).await
 }
 
 /// POST /api/v1/newsletter-subscriptions/confirm and /api/v1/newsletter-unsubscriptions/confirm
@@ -819,7 +870,9 @@ pub async fn newsletter_confirm(
     Json(body): Json<TokenConfirmRequest>,
 ) -> Result<StatusCode, AppError> {
     if body.token.len() != 64 {
-        return Err(AppError::Validation("token must be 64 hex chars".to_string()));
+        return Err(AppError::Validation(
+            "token must be 64 hex chars".to_string(),
+        ));
     }
     let pending = match action.as_str() {
         "subscriptions" => "subscribe",
@@ -834,7 +887,13 @@ pub async fn newsletter_confirm(
          SET status = CASE WHEN ? = 'subscribe' THEN 1 ELSE 0 END,
              pending_action = '', token_hash = NULL, token_expires_at = NULL, updated_at = ?
          WHERE token_hash = ? AND pending_action = ? AND token_expires_at > ?",
-        vec![json!(pending), json!(now), json!(token_hash), json!(pending), json!(now)],
+        vec![
+            json!(pending),
+            json!(now),
+            json!(token_hash),
+            json!(pending),
+            json!(now),
+        ],
     )
     .await?;
     if updated.rows_affected != 1 {
@@ -868,15 +927,17 @@ pub async fn account_request_create(
         return Err(AppError::Validation("amount must be positive".to_string()));
     }
     if body.kind != "deposit" && body.kind != "withdrawal" {
-        return Err(AppError::Validation("kind must be deposit or withdrawal".to_string()));
+        return Err(AppError::Validation(
+            "kind must be deposit or withdrawal".to_string(),
+        ));
     }
     let now = unix_now();
     let tx = crate::infrastructure::db::begin(state.rb).await?;
     let status = match body.kind.as_str() {
         "deposit" => {
-            let pid = body
-                .payment_id
-                .ok_or_else(|| AppError::Validation("payment_id is required for deposits".to_string()))?;
+            let pid = body.payment_id.ok_or_else(|| {
+                AppError::Validation("payment_id is required for deposits".to_string())
+            })?;
             let enabled = q1(
                 &tx,
                 "SELECT enabled AS enabled FROM ecs_payment WHERE pay_id = ?",

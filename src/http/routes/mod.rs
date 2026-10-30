@@ -156,11 +156,11 @@ pub fn api_v1_routes() -> Router<crate::http::state::AppState> {
         )
         .route(
             "/api/v1/newsletter-subscriptions/confirm",
-            post(account::newsletter_confirm),
+            post(account::newsletter_subscription_confirm),
         )
         .route(
             "/api/v1/newsletter-unsubscriptions/confirm",
-            post(account::newsletter_confirm),
+            post(account::newsletter_unsubscription_confirm),
         )
         .route(
             "/api/v1/me/account/requests",

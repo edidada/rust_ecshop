@@ -1,5 +1,6 @@
 """Remote-only HTTP acceptance: no real payment, email, carrier, or UCenter calls."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -105,6 +106,11 @@ def run():
     assert cart["items"][0]["price"] == quoted["unit_price"]
     order = request("POST", "/api/v1/orders", order_body, 201, key="sku-order")
     request("POST", f'/api/v1/me/orders/{order["id"]}/cancel', {})
+    # Both fixed newsletter paths must supply their action without a Path extractor.
+    for action, pending, token in [("subscriptions", "subscribe", "a"*64), ("unsubscriptions", "unsubscribe", "b"*64)]:
+        seed("INSERT OR REPLACE INTO ecs_email_list(email,status,token_hash,pending_action,token_expires_at) VALUES('newsletter@example.test',0,?,?,4102444800)", (hashlib.sha256(token.encode()).hexdigest(), pending))
+        request("POST", f"/api/v1/newsletter-{action}/confirm", {"token":token}, 204)
+        request("POST", f"/api/v1/newsletter-{action}/confirm", {"token":token}, 409)
     # Every registered URL is probed; successful business journeys above are distinct
     # from this route/error smoke coverage. Unknown resource IDs may return 404.
     source = (ROOT / "src/http/routes/mod.rs").read_text(encoding="utf-8-sig")
