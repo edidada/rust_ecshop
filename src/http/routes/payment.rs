@@ -457,7 +457,7 @@ fn parse_form(source: &str) -> Result<Vec<(String, String)>, AppError> {
     Ok(pairs)
 }
 
-fn form_value(pairs: &[(String, String)], field: &str) -> Option<&str> {
+fn form_value<'a>(pairs: &'a [(String, String)], field: &str) -> Option<&'a str> {
     pairs
         .iter()
         .find(|(k, _)| k == field)

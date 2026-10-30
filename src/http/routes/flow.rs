@@ -266,10 +266,11 @@ pub async fn adjustments<E: Executor>(
     if col_i64(&row, "insure") == 1 {
         super::mock::enabled()?;
     }
-    let discount = combined
+    let sum = combined
         .checked_add(points)
-        .and_then(|v| v.checked_min(goods))
         .ok_or_else(|| AppError::Validation("amount overflow".into()))?;
+    // min cannot overflow; it only bounds the stack by the goods amount.
+    let discount = sum.min(goods);
     Ok(Adjustment {
         extra,
         discount,
