@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS ecs_sessions (
  token_hash CHAR(64) PRIMARY KEY, user_id BIGINT NOT NULL, created_at BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
  FOREIGN KEY(user_id) REFERENCES ecs_users(user_id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS ecs_user_referral (
- user_id BIGINT PRIMARY KEY AUTO_INCREMENT,referrer_user_id BIGINT NOT NULL,created_at BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),CHECK(user_id<>referrer_user_id),
+ user_id BIGINT PRIMARY KEY AUTO_INCREMENT,referrer_user_id BIGINT NOT NULL,created_at BIGINT NOT NULL DEFAULT (UNIX_TIMESTAMP()),
  FOREIGN KEY(user_id) REFERENCES ecs_users(user_id) ON DELETE CASCADE,FOREIGN KEY(referrer_user_id) REFERENCES ecs_users(user_id) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE INDEX idx_ecs_user_referral_referrer ON ecs_user_referral(referrer_user_id,user_id);
 CREATE TABLE IF NOT EXISTS ecs_account_balance (

@@ -65,6 +65,9 @@ def seed(sql, params=()):
         with mysql_connect() as connection:
             connection.cursor().execute(translate_sql(sql), params)
     else:
+        # SQLite journeys are written in the MySQL dialect and translated
+        # back: uniquely keyed INSERT IGNORE becomes INSERT OR IGNORE.
+        sql = sql.replace("INSERT IGNORE", "INSERT OR IGNORE")
         with sqlite3.connect(DB, timeout=20) as connection:
             connection.execute(sql, params)
 

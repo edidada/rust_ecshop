@@ -30,6 +30,9 @@ def convert(sql):
     # into a generated id, which would corrupt seeded rank 0 rows.
     if 'CREATE TABLE IF NOT EXISTS ecs_user_rank' in sql:
         sql=sql.replace('rank_id BIGINT PRIMARY KEY AUTO_INCREMENT','rank_id BIGINT NOT NULL')
+    # MySQL CHECK constraints cannot reference an AUTO_INCREMENT column
+    # (#3818); this cross-column rule stays enforced by the referral handler.
+    sql=sql.replace('CHECK(user_id<>referrer_user_id),','')
     if sql.startswith('CREATE TABLE'):sql+=' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
     return sql
 
