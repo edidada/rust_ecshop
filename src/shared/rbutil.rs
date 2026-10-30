@@ -55,10 +55,7 @@ fn as_f64(v: Option<&Value>) -> f64 {
     match v {
         Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
         Some(Value::String(s)) => s.trim().parse().unwrap_or(0.0),
-        Some(Value::Bool(b))
-            if *b => {
-                1.0
-            }
+        Some(Value::Bool(b)) if *b => 1.0,
         _ => 0.0,
     }
 }
@@ -70,7 +67,9 @@ pub fn col_f64(row: &Value, key: &str) -> f64 {
 
 /// Read a numeric column as i64.
 pub fn col_i64(row: &Value, key: &str) -> i64 {
-    row.get(key).and_then(|v| v.as_i64()).unwrap_or_else(|| as_f64(row.get(key)) as i64)
+    row.get(key)
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| as_f64(row.get(key)) as i64)
 }
 
 /// Read a DECIMAL money column as integer cents.
@@ -82,6 +81,17 @@ pub fn col_str(row: &Value, key: &str) -> String {
     match row.get(key) {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
+        // rbdc may return TEXT/JSON as binary or structured JSON rather than String.
+        Some(Value::Array(items)) => {
+            let bytes: Option<Vec<u8>> = items
+                .iter()
+                .map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+                .collect();
+            bytes
+                .and_then(|b| String::from_utf8(b).ok())
+                .unwrap_or_else(|| Value::Array(items.clone()).to_string())
+        }
+        Some(value @ Value::Object(_)) => value.to_string(),
         _ => String::new(),
     }
 }
