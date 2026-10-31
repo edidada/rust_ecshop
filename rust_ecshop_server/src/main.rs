@@ -17,6 +17,6 @@ async fn main() -> anyhow::Result<()> {
         .init();
     app::run()
         .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     Ok(())
 }
