@@ -84,9 +84,10 @@ cargo tree -i sha2     # 反查谁依赖了 sha2
 **一句话**：让你确认项目别同时装两份 `sha2`/`hmac`，否则类型对不上、编译报错或二进制膨胀，而 `cargo tree -d` 就是查这个的工具。
 ## 仓库结构（cargo workspace）
 
-本仓库自 2026-10-31 起为 cargo workspace：
+本仓库自 2026-10-31 起为三 crate 的 cargo workspace（`members = ["rust_ecshop_domain", "rust_ecshop_infra", "rust_ecshop_server"]`）：
 
-- 根 `Cargo.toml` 只声明 workspace 与公共 profile；
-- 业务 crate 位于 `crates/rust_ecshop`（同一 `src/` 分层原样迁移）；
-- SQL 仍以 `docs/sql/` 为单一事实源，crate 用 `include_str!` 以相对路径引用；
+- `rust_ecshop_domain`（纯业务）：实体/值对象/状态机/仓储 trait/业务错误与纯工具；`http_compat` 是该 crate 唯一触碰 axum 的模块（业务错误 → 统一 JSON 错误体）；
+- `rust_ecshop_infra`（数据库与外部实现）：rbatis 池、SQLite→MySQL 方言翻译、加密、查询工具；驱动错误在 crate 边界显式映射为业务错误，公共 API 不泄漏 rbatis 错误类型；
+- `rust_ecshop_server`（HTTP + 组装入口）：axum 路由/中间件/配置与 `main`；bin 名仍为 `rust_ecshop`；
+- SQL 仍以 `docs/sql/` 为单一事实源，infra 用 `include_str!` 相对路径引用；
 - `cargo build/test/clippy` 在仓库根执行（workspace 感知），二进制仍在 `target/debug/`。

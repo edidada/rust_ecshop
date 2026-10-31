@@ -1,0 +1,28 @@
+[package]
+name = "rust_ecshop_server"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP edge and assembly entry of the ECShop port (axum + rbatis)"
+
+[[bin]]
+name = "rust_ecshop"
+path = "src/main.rs"
+
+[dependencies]
+rust_ecshop_domain = { path = "../rust_ecshop_domain" }
+rust_ecshop_infra = { path = "../rust_ecshop_infra" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+anyhow = "1"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+rand = "0.8"

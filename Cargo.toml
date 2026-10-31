@@ -1,6 +1,7 @@
+
 [workspace]
 resolver = "2"
-members = ["crates/rust_ecshop"]
+members = ["rust_ecshop_domain", "rust_ecshop_infra", "rust_ecshop_server"]
 
 [workspace.package]
 version = "0.1.0"

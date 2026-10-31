@@ -1523,12 +1523,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_ecshop"
+name = "rust_ecshop_domain"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "rust_ecshop_infra"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "hex",
  "hmac",
  "md-5",
@@ -1540,6 +1550,24 @@ dependencies = [
  "rbdc-mysql",
  "rbdc-sqlite",
  "rbs",
+ "rust_ecshop_domain",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rust_ecshop_server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "hex",
+ "hmac",
+ "rand 0.8.8",
+ "rust_ecshop_domain",
+ "rust_ecshop_infra",
  "serde",
  "serde_json",
  "sha2",

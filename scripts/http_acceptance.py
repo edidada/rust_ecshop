@@ -386,7 +386,7 @@ def run():
         request("POST", f"/api/v1/newsletter-{action}/confirm", {"token":token}, 409)
     # Every registered URL is probed; successful business journeys above are distinct
     # from this route/error smoke coverage. Unknown resource IDs may return 404.
-    source = (ROOT / "crates/rust_ecshop/src/http/routes/mod.rs").read_text(encoding="utf-8-sig")
+    source = (ROOT / "rust_ecshop_server/src/http/routes/mod.rs").read_text(encoding="utf-8-sig")
     routes = re.findall(r'\.route\(\s*"([^"]+)"\s*,\s*(.*?)(?=\n\s*\.(?:route|nest)|\n\})', source, re.S)
     for template, handler in routes:
         path = re.sub(r":\w+", "1", template)

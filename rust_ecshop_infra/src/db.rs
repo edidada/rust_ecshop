@@ -1,0 +1,252 @@
+//! rbatis pool bootstrap: supports SQLite (dev) and MySQL (production) through one API.
+
+use once_cell::sync::OnceCell;
+use rbatis::executor::Executor;
+use std::sync::atomic::{AtomicBool, Ordering};
+static MYSQL: AtomicBool = AtomicBool::new(false);
+pub fn is_mysql() -> bool {
+    MYSQL.load(Ordering::Relaxed)
+}
+pub fn sql(statement: &str) -> String {
+    if is_mysql() {
+        crate::dialect::mysql(statement)
+    } else {
+        statement.to_string()
+    }
+}
+use rbatis::rbatis::RBatis;
+use rbdc_mysql::driver::MysqlDriver;
+use rbdc_sqlite::driver::SqliteDriver;
+
+static RB: OnceCell<RBatis> = OnceCell::new();
+static INIT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+/// Global pool reference. Panics only if called before `init`.
+pub fn rb() -> &'static RBatis {
+    RB.get().expect("rbatis is not initialized")
+}
+
+/// Begin a transaction that rolls back automatically when the guard is dropped
+/// without commit (error paths included). Without this, an early `?` return
+/// would hand a connection with an open transaction back to the pool and poison it.
+pub async fn begin(
+    rb: &RBatis,
+) -> rust_ecshop_domain::error::AppResult<rbatis::executor::RBatisTxExecutorGuard> {
+    let tx = rb.acquire_begin().await.map_err(crate::internal)?;
+    Ok(tx.defer_async(|tx| async move {
+        if !tx.done() {
+            let _ = tx.rollback().await;
+        }
+    }))
+}
+
+/// Commit through this helper so driver errors become the business error at
+/// the source; the server never sees the rbatis error type.
+pub async fn commit(
+    tx: &rbatis::executor::RBatisTxExecutorGuard,
+) -> rust_ecshop_domain::error::AppResult<()> {
+    tx.commit().await.map_err(crate::internal)
+}
+
+/// Initialize the pool from a database URL and bootstrap the schema.
+/// Supported URLs: `sqlite://data/ecshop.sqlite3`, `mysql://user:pass@host/db`.
+pub async fn init(database_url: &str) -> Result<&'static RBatis, String> {
+    INIT.get_or_try_init(|| async {
+        let rb = RBatis::new();
+        if database_url.starts_with("sqlite://") {
+            // rbdc-sqlite creates the DB file but not its parent directories.
+            if let Some(parent) = database_url
+                .trim_start_matches("sqlite://")
+                .split('?')
+                .next()
+                .map(std::path::Path::new)
+                .and_then(|p| p.parent())
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            rb.init(SqliteDriver {}, database_url)
+                .map_err(|e| format!("init sqlite pool failed: {e}"))?;
+            bootstrap_sqlite_schema(&rb)
+                .await
+                .map_err(|e| format!("bootstrap sqlite schema failed: {e}"))?;
+        } else if database_url.starts_with("mysql://") {
+            MYSQL.store(true, Ordering::Relaxed);
+            rb.init(MysqlDriver {}, database_url)
+                .map_err(|e| format!("init mysql pool failed: {e}"))?;
+            bootstrap_mysql(&rb)
+                .await
+                .map_err(|e| format!("mysql migration failed: {e}"))?;
+        } else {
+            return Err(format!("unsupported database url: {database_url}"));
+        }
+        RB.set(rb)
+            .map_err(|_| "rbatis already initialized".to_string())
+    })
+    .await
+    .map_err(|e| e.clone())?;
+    Ok(RB.get().expect("initialized above"))
+}
+
+async fn bootstrap_sqlite_schema(rb: &RBatis) -> rust_ecshop_domain::error::AppResult<()> {
+    let schema = include_str!("../../docs/sql/sqlite/001_ecshop_catalog.sql");
+    for stmt in split_statements(schema) {
+        rb.exec(&stmt, vec![]).await.map_err(crate::internal)?;
+    }
+    let compat = include_str!("../../docs/sql/sqlite/002_compat.sql");
+    for stmt in split_statements(compat) {
+        rb.exec(&stmt, vec![]).await.map_err(crate::internal)?;
+    }
+    for stmt in split_statements(include_str!("../../docs/sql/sqlite/003_checkout.sql")) {
+        rb.exec(&stmt, vec![]).await.map_err(crate::internal)?;
+    }
+    for stmt in split_statements(include_str!("../../docs/sql/sqlite/004_rules.sql")) {
+        rb.exec(&stmt, vec![]).await.map_err(crate::internal)?;
+    }
+    // The dev schema lacks a few columns the API surface expects; add them
+    // idempotently (ALTER TABLE errors are ignored when the column exists).
+    for stmt in [
+        "ALTER TABLE ecs_users ADD COLUMN mobile_phone VARCHAR(32) NOT NULL DEFAULT ''",
+        "ALTER TABLE ecs_users ADD COLUMN is_validated INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE ecs_users ADD COLUMN pay_points INTEGER NOT NULL DEFAULT 0",
+    ] {
+        if let Err(e) = rb.exec(stmt, vec![]).await {
+            tracing::debug!("schema bootstrap (expected when column exists): {e}");
+        }
+    }
+    Ok(())
+}
+
+async fn bootstrap_mysql(rb: &RBatis) -> rust_ecshop_domain::error::AppResult<()> {
+    let conn = rb.acquire().await.map_err(crate::internal)?;
+    if std::env::var("ECSHOP_AUTO_MIGRATE").as_deref() == Ok("1") {
+        conn.exec("CREATE TABLE IF NOT EXISTS ecs_schema_migrations(version BIGINT PRIMARY KEY, applied_at BIGINT NOT NULL)",vec![]).await.map_err(crate::internal)?;
+        let locked = crate::rbutil::q1(
+            &conn,
+            "SELECT GET_LOCK('rust_ecshop_schema',30) AS acquired",
+            vec![],
+        )
+        .await
+        .map_err(crate::internal)?;
+        if locked
+            .as_ref()
+            .map(|r| crate::rbutil::col_i64(r, "acquired"))
+            != Some(1)
+        {
+            return Err(crate::internal("schema migration lock timeout".to_string()));
+        }
+        let result=async {
+            let rows=conn.query("SELECT version FROM ecs_schema_migrations WHERE version=1",vec![]).await.map_err(crate::internal)?;
+            if rows.as_array().is_none_or(|r|r.is_empty()) {
+                for stmt in split_statements(include_str!("../../docs/sql/mysql/001_runtime.sql")) {conn.exec(&stmt,vec![]).await.map_err(crate::internal)?;}
+                conn.exec("INSERT INTO ecs_schema_migrations(version,applied_at) VALUES(1,UNIX_TIMESTAMP())",vec![]).await.map_err(crate::internal)?;
+            }
+            Ok::<(), rust_ecshop_domain::error::AppError>(())
+        }.await;
+        let _ = conn
+            .exec("SELECT RELEASE_LOCK('rust_ecshop_schema')", vec![])
+            .await;
+        result?;
+    }
+    let rows = conn
+        .query(
+            "SELECT version FROM ecs_schema_migrations WHERE version=1",
+            vec![],
+        )
+        .await
+        .map_err(crate::internal)?;
+    if rows.as_array().is_none_or(|r| r.is_empty()) {
+        return Err(crate::internal(
+            "runtime schema version 1 is required".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Serialize an authenticated user's transactional writes across pools and backends.
+pub async fn lock_user<E: Executor>(
+    tx: &E,
+    user: i64,
+) -> Result<(), rust_ecshop_domain::error::AppError> {
+    crate::rbutil::e(
+        tx,
+        "INSERT OR IGNORE INTO ecs_user_write_lock(user_id) VALUES(?)",
+        vec![serde_json::json!(user)],
+    )
+    .await
+    .map_err(crate::internal)?;
+    crate::rbutil::e(
+        tx,
+        "UPDATE ecs_user_write_lock SET version=version+1 WHERE user_id=?",
+        vec![serde_json::json!(user)],
+    )
+    .await
+    .map_err(crate::internal)?;
+    Ok(())
+}
+
+/// Quote-aware SQL statement splitter: splits on `;` outside string literals,
+/// drops `--` line comments, and strips transaction wrappers / PRAGMA lines
+/// (each statement runs through the pool directly).
+fn split_statements(sql: &str) -> Vec<String> {
+    let mut statements: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            // SQLite escapes quotes by doubling: '' toggles twice => still inside.
+            in_quote = !in_quote;
+            current.push(c);
+        } else if c == ';' && !in_quote {
+            statements.push(current.clone());
+            current.clear();
+        } else if c == '-' && !in_quote && chars.peek() == Some(&'-') {
+            // Line comment: skip up to and including the newline.
+            for n in chars.by_ref() {
+                if n == '\n' {
+                    break;
+                }
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    statements.push(current);
+    statements
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            let upper = s.to_ascii_uppercase();
+            upper != "BEGIN" && upper != "COMMIT" && !upper.starts_with("PRAGMA")
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_statements_strips_wrappers_and_comments() {
+        let sql = "-- comment\nPRAGMA foreign_keys = ON;\nBEGIN;\nCREATE TABLE a (id INTEGER);\nINSERT INTO a VALUES (1);\nCOMMIT;\n";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].starts_with("CREATE TABLE a"));
+        assert!(stmts[1].starts_with("INSERT INTO a"));
+    }
+
+    #[test]
+    fn split_statements_keeps_multi_line_statements_and_quoted_semicolons() {
+        let sql =
+            "CREATE TABLE t (\n  id INTEGER,\n  note TEXT\n);\nINSERT INTO t VALUES (1, 'a;b');\n";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("note TEXT"));
+        assert!(
+            stmts[1].contains("'a;b'"),
+            "quoted semicolon must not split: {stmts:?}"
+        );
+    }
+}
