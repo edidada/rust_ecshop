@@ -82,3 +82,11 @@ cargo tree -i sha2     # 反查谁依赖了 sha2
 这样这次修复不仅当下正确，还防止以后有人再引入旧版本时悄悄埋雷。
 
 **一句话**：让你确认项目别同时装两份 `sha2`/`hmac`，否则类型对不上、编译报错或二进制膨胀，而 `cargo tree -d` 就是查这个的工具。
+## 仓库结构（cargo workspace）
+
+本仓库自 2026-10-31 起为 cargo workspace：
+
+- 根 `Cargo.toml` 只声明 workspace 与公共 profile；
+- 业务 crate 位于 `crates/rust_ecshop`（同一 `src/` 分层原样迁移）；
+- SQL 仍以 `docs/sql/` 为单一事实源，crate 用 `include_str!` 以相对路径引用；
+- `cargo build/test/clippy` 在仓库根执行（workspace 感知），二进制仍在 `target/debug/`。

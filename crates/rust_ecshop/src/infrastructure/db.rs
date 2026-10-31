@@ -79,18 +79,18 @@ pub async fn init(database_url: &str) -> Result<&'static RBatis, String> {
 }
 
 async fn bootstrap_sqlite_schema(rb: &RBatis) -> Result<(), rbatis::Error> {
-    let schema = include_str!("../../docs/sql/sqlite/001_ecshop_catalog.sql");
+    let schema = include_str!("../../../../docs/sql/sqlite/001_ecshop_catalog.sql");
     for stmt in split_statements(schema) {
         rb.exec(&stmt, vec![]).await?;
     }
-    let compat = include_str!("../../docs/sql/sqlite/002_compat.sql");
+    let compat = include_str!("../../../../docs/sql/sqlite/002_compat.sql");
     for stmt in split_statements(compat) {
         rb.exec(&stmt, vec![]).await?;
     }
-    for stmt in split_statements(include_str!("../../docs/sql/sqlite/003_checkout.sql")) {
+    for stmt in split_statements(include_str!("../../../../docs/sql/sqlite/003_checkout.sql")) {
         rb.exec(&stmt, vec![]).await?;
     }
-    for stmt in split_statements(include_str!("../../docs/sql/sqlite/004_rules.sql")) {
+    for stmt in split_statements(include_str!("../../../../docs/sql/sqlite/004_rules.sql")) {
         rb.exec(&stmt, vec![]).await?;
     }
     // The dev schema lacks a few columns the API surface expects; add them
@@ -130,7 +130,7 @@ async fn bootstrap_mysql(rb: &RBatis) -> Result<(), rbatis::Error> {
         let result=async {
             let rows=conn.query("SELECT version FROM ecs_schema_migrations WHERE version=1",vec![]).await?;
             if rows.as_array().is_none_or(|r|r.is_empty()) {
-                for stmt in split_statements(include_str!("../../docs/sql/mysql/001_runtime.sql")) {conn.exec(&stmt,vec![]).await?;}
+                for stmt in split_statements(include_str!("../../../../docs/sql/mysql/001_runtime.sql")) {conn.exec(&stmt,vec![]).await?;}
                 conn.exec("INSERT INTO ecs_schema_migrations(version,applied_at) VALUES(1,UNIX_TIMESTAMP())",vec![]).await?;
             }
             Ok::<(),rbatis::Error>(())
