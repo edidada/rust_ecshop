@@ -69,14 +69,14 @@ pub async fn init(database_url: &str) -> Result<&'static RBatis, String> {
                 .map_err(|e| format!("init sqlite pool failed: {e}"))?;
             bootstrap_sqlite_schema(&rb)
                 .await
-                .map_err(|e| format!("bootstrap sqlite schema failed: {e}"))?;
+                .map_err(|e| format!("bootstrap sqlite schema failed: {e:?}"))?;
         } else if database_url.starts_with("mysql://") {
             MYSQL.store(true, Ordering::Relaxed);
             rb.init(MysqlDriver {}, database_url)
                 .map_err(|e| format!("init mysql pool failed: {e}"))?;
             bootstrap_mysql(&rb)
                 .await
-                .map_err(|e| format!("mysql migration failed: {e}"))?;
+                .map_err(|e| format!("mysql migration failed: {e:?}"))?;
         } else {
             return Err(format!("unsupported database url: {database_url}"));
         }
